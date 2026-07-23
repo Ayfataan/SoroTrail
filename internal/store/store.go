@@ -22,7 +22,14 @@ type Event struct {
 	InSuccessfulCall bool            `json:"in_successful_call"`
 	Topics           json.RawMessage `json:"topics"`
 	Value            json.RawMessage `json:"value"`
-	CreatedAt        time.Time       `json:"created_at"`
+	// DecodedPayload is the JSON document a WASM plugin returned for this
+	// event. nil when no plugin claimed the event or all claiming plugins
+	// answered "not mine".
+	DecodedPayload json.RawMessage `json:"decoded_payload,omitempty"`
+	// DecodedBy is the declared name of the plugin that produced
+	// DecodedPayload. "" when DecodedPayload is nil.
+	DecodedBy string `json:"decoded_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // EventFilter narrows a QueryEvents call. Zero values mean "no constraint".
@@ -31,7 +38,10 @@ type EventFilter struct {
 	Type       string
 	// Topic matches events whose topics array contains this JSON value at any
 	// position (Postgres jsonb containment).
-	Topic      json.RawMessage
+	Topic json.RawMessage
+	// Decoded matches events whose plugin-decoded payload contains this
+	// JSON value (Postgres @> containment on decoded_payload).
+	Decoded json.RawMessage
 	FromLedger int64 // inclusive
 	ToLedger   int64 // inclusive
 	// Cursor is the ID of the last event from the previous page.
@@ -52,6 +62,7 @@ type Stats struct {
 	LastIngestedLedger int64 `json:"last_ingested_ledger"`
 	ContractCount      int64 `json:"contract_count"`
 	WatchedContracts   int64 `json:"watched_contracts"`
+	DecodedEvents      int64 `json:"decoded_events"`
 }
 
 // Store is the persistence boundary. The ingester and API depend on this

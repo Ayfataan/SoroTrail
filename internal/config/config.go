@@ -22,6 +22,19 @@ type Config struct {
 	StartLedger      uint32        `env:"START_LEDGER"`
 	RetentionLedgers uint32        `env:"RETENTION_LEDGERS" envDefault:"17280"`
 	LogLevel         string        `env:"LOG_LEVEL" envDefault:"info"`
+
+	// Decoder plugins directory (empty = no plugins). Each .wasm file in
+	// this directory is loaded at startup; see docs/plugins.md for the ABI.
+	DecoderPluginsDir string `env:"DECODER_PLUGINS_DIR"`
+	// Per-call walltime limit on plugin decode_event invocations, in ms.
+	PluginTimeoutMS int `env:"PLUGIN_TIMEOUT_MS" envDefault:"50"`
+	// Linear-memory cap per plugin invocation, in MiB.
+	PluginMemoryMiB int `env:"PLUGIN_MEMORY_MIB" envDefault:"16"`
+	// Largest JSON document a plugin may return, in bytes.
+	PluginOutputMaxBytes int `env:"PLUGIN_OUTPUT_MAX_BYTES" envDefault:"65536"`
+	// Consecutive-failure count before a plugin is disabled for the rest
+	// of the process lifetime (mirrors #13 webhook auto-disable pattern).
+	PluginFailThreshold int `env:"PLUGIN_FAIL_THRESHOLD" envDefault:"5"`
 }
 
 // Load reads configuration from the environment and validates it.
@@ -62,6 +75,18 @@ func (c Config) Validate() error {
 		if !ValidContractID(id) {
 			return fmt.Errorf("WATCHED_CONTRACTS entry %q is not a valid contract ID (want C... strkey, 56 chars)", id)
 		}
+	}
+	if c.PluginTimeoutMS <= 0 {
+		return fmt.Errorf("PLUGIN_TIMEOUT_MS must be positive")
+	}
+	if c.PluginMemoryMiB <= 0 {
+		return fmt.Errorf("PLUGIN_MEMORY_MIB must be positive")
+	}
+	if c.PluginOutputMaxBytes < 64 {
+		return fmt.Errorf("PLUGIN_OUTPUT_MAX_BYTES must be at least 64")
+	}
+	if c.PluginFailThreshold <= 0 {
+		return fmt.Errorf("PLUGIN_FAIL_THRESHOLD must be positive")
 	}
 	return nil
 }

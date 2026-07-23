@@ -20,6 +20,7 @@ import (
 	"github.com/khaylebfortune/sorotrail/internal/config"
 	"github.com/khaylebfortune/sorotrail/internal/decode"
 	"github.com/khaylebfortune/sorotrail/internal/ingester"
+	"github.com/khaylebfortune/sorotrail/internal/plugins"
 	"github.com/khaylebfortune/sorotrail/internal/rpc"
 	"github.com/khaylebfortune/sorotrail/internal/store"
 )
@@ -61,7 +62,19 @@ func run() error {
 	}
 
 	rpcClient := rpc.NewHTTPClient(cfg.RPCURL)
-	ing := ingester.New(rpcClient, st, decode.XDRDecoder{}, log, ingester.Options{
+
+	pluginMgr, err := plugins.NewManager(ctx, cfg.DecoderPluginsDir, plugins.Limits{
+		Timeout:       int64(cfg.PluginTimeoutMS),
+		MemoryMiB:     cfg.PluginMemoryMiB,
+		OutputCap:     cfg.PluginOutputMaxBytes,
+		FailThreshold: cfg.PluginFailThreshold,
+	}, log)
+	if err != nil {
+		return fmt.Errorf("loading decoder plugins: %w", err)
+	}
+	defer pluginMgr.Close(ctx)
+
+	ing := ingester.New(rpcClient, st, decode.XDRDecoder{}, pluginMgr, log, ingester.Options{
 		PollInterval:     cfg.PollInterval,
 		StartLedger:      cfg.StartLedger,
 		RetentionLedgers: cfg.RetentionLedgers,

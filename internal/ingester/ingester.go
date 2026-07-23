@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/khaylebfortune/sorotrail/internal/decode"
+	"github.com/khaylebfortune/sorotrail/internal/plugins"
 	"github.com/khaylebfortune/sorotrail/internal/rpc"
 	"github.com/khaylebfortune/sorotrail/internal/store"
 )
@@ -57,15 +58,17 @@ type Ingester struct {
 	client  rpc.Client
 	store   store.Store
 	decoder decode.Decoder
+	plugins *plugins.Manager
 	log     *slog.Logger
 	opts    Options
 }
 
 // New wires an Ingester. All dependencies are interfaces so tests can supply
-// mocks.
-func New(client rpc.Client, st store.Store, dec decode.Decoder, log *slog.Logger, opts Options) *Ingester {
+// mocks. pluginMgr may be nil — when nil, no plugin decoding is attempted
+// and events are stored with empty decoded_payload.
+func New(client rpc.Client, st store.Store, dec decode.Decoder, pluginMgr *plugins.Manager, log *slog.Logger, opts Options) *Ingester {
 	opts.applyDefaults()
-	return &Ingester{client: client, store: st, decoder: dec, log: log, opts: opts}
+	return &Ingester{client: client, store: st, decoder: dec, plugins: pluginMgr, log: log, opts: opts}
 }
 
 // Run polls until ctx is canceled. Errors are logged and retried with
@@ -341,7 +344,7 @@ func (ing *Ingester) toStoreEvent(re rpc.Event) (store.Event, error) {
 	if err != nil {
 		return store.Event{}, fmt.Errorf("decoding event %s: %w", re.ID, err)
 	}
-	return store.Event{
+	ev := store.Event{
 		ID:               re.ID,
 		ContractID:       re.ContractID,
 		Ledger:           int64(re.Ledger),
@@ -352,7 +355,26 @@ func (ing *Ingester) toStoreEvent(re rpc.Event) (store.Event, error) {
 		InSuccessfulCall: re.InSuccessfulContractCall,
 		Topics:           topics,
 		Value:            value,
-	}, nil
+	}
+	// Plugin step is best-effort. Lossless fallback: the raw topics/value
+	// are already on the row, so a plugin failure never blocks ingestion
+	// or loses event data.
+	if ing.plugins != nil {
+		input, err := plugins.NewInput(re.ID, re.ContractID, int64(re.Ledger), topics, value)
+		if err != nil {
+			return store.Event{}, fmt.Errorf("building plugin input for %s: %w", re.ID, err)
+		}
+		result, _, perr := ing.plugins.Decode(context.Background(), input)
+		if perr != nil {
+			// Per-call failures were already counted by the manager.
+			ing.log.Debug("plugin decode failed", "event_id", re.ID, "error", perr)
+		}
+		if len(result.Payload) > 0 {
+			ev.DecodedPayload = result.Payload
+			ev.DecodedBy = result.Plugin
+		}
+	}
+	return ev, nil
 }
 
 // sleepCtx sleeps for d or until ctx is done; it reports whether the full

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -38,14 +39,20 @@ func (p *Postgres) UpsertEvents(ctx context.Context, events []Event) (int64, err
 	}
 	batch := &pgx.Batch{}
 	for _, e := range events {
+		// decoded_payload and decoded_by are written NULL when the plugin
+		// step didn't claim the event; ON CONFLICT DO NOTHING means a
+		// re-ingest that picked up a plugin will not retroactively fill
+		// historical rows — that's expected for v1 (operators run a
+		// backfill script when upgrading).
 		batch.Queue(`
 			INSERT INTO events
 				(id, contract_id, ledger, type, tx_hash, tx_index, op_index,
-				 in_successful_call, topics, value)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				 in_successful_call, topics, value, decoded_payload, decoded_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			ON CONFLICT (id) DO NOTHING`,
 			e.ID, e.ContractID, e.Ledger, e.Type, e.TxHash, e.TxIndex,
 			e.OpIndex, e.InSuccessfulCall, e.Topics, e.Value,
+			nullableJSON(e.DecodedPayload), nullableText(e.DecodedBy),
 		)
 	}
 	results := p.pool.SendBatch(ctx, batch)
@@ -63,7 +70,7 @@ func (p *Postgres) UpsertEvents(ctx context.Context, events []Event) (int64, err
 }
 
 const eventColumns = `id, contract_id, ledger, type, tx_hash, tx_index, op_index,
-	in_successful_call, topics, value, created_at`
+	in_successful_call, topics, value, decoded_payload, decoded_by, created_at`
 
 func (p *Postgres) GetEvent(ctx context.Context, id string) (Event, error) {
 	row := p.pool.QueryRow(ctx, `SELECT `+eventColumns+` FROM events WHERE id = $1`, id)
@@ -213,8 +220,9 @@ func (p *Postgres) Stats(ctx context.Context) (Stats, error) {
 			(SELECT count(*) FROM events),
 			(SELECT coalesce(max(last_ingested_ledger), 0) FROM ingestion_state),
 			(SELECT count(DISTINCT contract_id) FROM events),
-			(SELECT count(*) FROM watched_contracts)`,
-	).Scan(&s.TotalEvents, &s.LastIngestedLedger, &s.ContractCount, &s.WatchedContracts)
+			(SELECT count(*) FROM watched_contracts),
+			(SELECT count(*) FROM events WHERE decoded_payload IS NOT NULL)`,
+	).Scan(&s.TotalEvents, &s.LastIngestedLedger, &s.ContractCount, &s.WatchedContracts, &s.DecodedEvents)
 	if err != nil {
 		return Stats{}, fmt.Errorf("loading stats: %w", err)
 	}
@@ -228,9 +236,27 @@ func (p *Postgres) Ping(ctx context.Context) error {
 func scanEvent(row pgx.Row) (Event, error) {
 	var e Event
 	err := row.Scan(&e.ID, &e.ContractID, &e.Ledger, &e.Type, &e.TxHash,
-		&e.TxIndex, &e.OpIndex, &e.InSuccessfulCall, &e.Topics, &e.Value, &e.CreatedAt)
+		&e.TxIndex, &e.OpIndex, &e.InSuccessfulCall, &e.Topics, &e.Value,
+		&e.DecodedPayload, &e.DecodedBy, &e.CreatedAt)
 	if err != nil {
 		return Event{}, err
 	}
 	return e, nil
+}
+
+// nullableJSON turns an empty/zero RawMessage into a nil so pgx binds
+// it as SQL NULL instead of an empty-string literal (which would
+// error on the jsonb column).
+func nullableJSON(b json.RawMessage) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return []byte(b)
+}
+
+func nullableText(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
