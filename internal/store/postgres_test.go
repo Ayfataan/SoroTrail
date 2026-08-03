@@ -119,7 +119,7 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 	})
 
 	t.Run("by type", func(t *testing.T) {
-		got, _, err := st.QueryEvents(ctx, EventFilter{Type: "diagnostic"})
+		got, _, err := st.QueryEvents(ctx, EventFilter{Types: []string{"diagnostic"}})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, eventID(3), got[0].ID)
@@ -152,6 +152,98 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 			assert.Less(t, all[i-1].ID, all[i].ID, "ascending ID order across pages")
 		}
 	})
+}
+
+func TestQueryEvents_MultiContract_UnionOrderedAndPaginated(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	// Interleave contracts by ID so chronological order genuinely crosses
+	// contract boundaries: A, B, A, B, ...
+	var events []Event
+	for i := 1; i <= 8; i++ {
+		contract := contractA
+		if i%2 == 0 {
+			contract = contractB
+		}
+		events = append(events, testEvent(eventID(i), int64(100+i), contract))
+	}
+	_, err := st.UpsertEvents(ctx, events)
+	require.NoError(t, err)
+
+	t.Run("union returns both contracts in ascending ID order", func(t *testing.T) {
+		got, next, err := st.QueryEvents(ctx, EventFilter{ContractIDs: []string{contractB, contractA}})
+		require.NoError(t, err)
+		assert.Empty(t, next, "all 8 events fit in one page (default limit 50)")
+		require.Len(t, got, 8)
+		for i := 1; i < len(got); i++ {
+			assert.Less(t, got[i-1].ID, got[i].ID, "ascending ID order across the union")
+		}
+	})
+
+	t.Run("single-value ContractID still behaves as before", func(t *testing.T) {
+		got, _, err := st.QueryEvents(ctx, EventFilter{ContractID: contractA})
+		require.NoError(t, err)
+		require.Len(t, got, 4)
+		for _, e := range got {
+			assert.Equal(t, contractA, e.ContractID)
+		}
+	})
+
+	t.Run("ContractID and ContractIDs merge into one union", func(t *testing.T) {
+		got, _, err := st.QueryEvents(ctx, EventFilter{ContractID: contractA, ContractIDs: []string{contractB}})
+		require.NoError(t, err)
+		assert.Len(t, got, 8, "matching either contract qualifies; no duplicate IDs")
+	})
+
+	t.Run("cursor pagination walks the whole union exactly once", func(t *testing.T) {
+		var all []Event
+		cursor := ""
+		for {
+			page, next, err := st.QueryEvents(ctx, EventFilter{ContractIDs: []string{contractA, contractB}, Limit: 3, Cursor: cursor})
+			require.NoError(t, err)
+			all = append(all, page...)
+			if next == "" {
+				break
+			}
+			cursor = next
+		}
+		require.Len(t, all, 8, "every event of both contracts appears exactly once")
+		seen := map[string]bool{}
+		for i, e := range all {
+			assert.False(t, seen[e.ID], "event %s seen twice across pages", e.ID)
+			seen[e.ID] = true
+			if i > 0 {
+				assert.Less(t, all[i-1].ID, e.ID, "ascending ID order across pages of the union")
+			}
+		}
+	})
+}
+
+func TestQueryEvents_MultiType(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	_, err := st.UpsertEvents(ctx, []Event{
+		testEvent(eventID(1), 100, contractA), // contract
+		testEvent(eventID(2), 101, contractB), // contract
+	})
+	require.NoError(t, err)
+	e := testEvent(eventID(3), 102, contractA)
+	e.Type = "diagnostic"
+	e.Topics = json.RawMessage(`[{"symbol":"mint"}]`)
+	_, err = st.UpsertEvents(ctx, []Event{e})
+	require.NoError(t, err)
+	e = testEvent(eventID(4), 103, contractB)
+	e.Type = "system"
+	_, err = st.UpsertEvents(ctx, []Event{e})
+	require.NoError(t, err)
+
+	got, next, err := st.QueryEvents(ctx, EventFilter{Types: []string{"contract", "diagnostic"}})
+	require.NoError(t, err)
+	assert.Empty(t, next)
+	require.Len(t, got, 3)
+	assert.Equal(t, []string{eventID(1), eventID(2), eventID(3)}, []string{got[0].ID, got[1].ID, got[2].ID})
 }
 
 func TestIngestionStateRoundTrip(t *testing.T) {

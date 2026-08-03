@@ -91,11 +91,18 @@ func (p *Postgres) QueryEvents(ctx context.Context, f EventFilter) ([]Event, str
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
 	}
-	if f.ContractID != "" {
-		where = append(where, "contract_id = "+arg(f.ContractID))
+	if f.ContractID != "" || len(f.ContractIDs) > 0 {
+		// A single ID keeps the historical `contract_id = $n` shape; any
+		// list (with ContractID folded in) becomes `contract_id = ANY($n)`,
+		// which Postgres can satisfy with the contract_id index.
+		if len(f.ContractIDs) > 0 {
+			where = append(where, "contract_id = ANY("+arg(mergeContractIDs(f.ContractID, f.ContractIDs))+")")
+		} else {
+			where = append(where, "contract_id = "+arg(f.ContractID))
+		}
 	}
-	if f.Type != "" {
-		where = append(where, "type = "+arg(f.Type))
+	if len(f.Types) > 0 {
+		where = append(where, "type = ANY("+arg(f.Types)+")")
 	}
 	if len(f.Topic) > 0 {
 		// Containment on the array matches the topic at any position.
@@ -223,6 +230,21 @@ func (p *Postgres) Stats(ctx context.Context) (Stats, error) {
 
 func (p *Postgres) Ping(ctx context.Context) error {
 	return p.pool.Ping(ctx)
+}
+
+// mergeContractIDs folds a single contract ID into a list for `= ANY(...)`,
+// dropping duplicates, so EventFilter.ContractID and EventFilter.ContractIDs
+// behave as a plain union.
+func mergeContractIDs(single string, list []string) []string {
+	if single == "" {
+		return list
+	}
+	for _, id := range list {
+		if id == single {
+			return list
+		}
+	}
+	return append([]string{single}, list...)
 }
 
 func scanEvent(row pgx.Row) (Event, error) {

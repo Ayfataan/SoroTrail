@@ -102,8 +102,8 @@ Query parameters (all optional, combinable):
 
 | Param | Example | Meaning |
 | --- | --- | --- |
-| `contract_id` | `CDLZ...CYSC` | Only events from this contract. |
-| `type` | `contract` | `contract` \| `system` \| `diagnostic`. |
+| `contract_id` | `CDLZ...CYSC` | Only events from this contract. Accepts multiple values as a comma-separated list (`contract_id=C1,C2`) or as repeated parameters (`contract_id=C1&contract_id=C2`) — but not both styles at once, and at most 20 values. One query then returns the union in ascending event-ID order with a single cursor. |
+| `type` | `contract` | `contract` \| `system` \| `diagnostic`. Accepts multiple values the same way, e.g. `type=contract,system`. |
 | `topic` | `{"symbol":"transfer"}` | Exact match against any topic position. A bare word is treated as a JSON string. |
 | `from_ledger` | `250000` | Inclusive lower ledger bound. |
 | `to_ledger` | `260000` | Inclusive upper ledger bound. |
@@ -111,7 +111,7 @@ Query parameters (all optional, combinable):
 | `cursor` | `0001234...` | Opaque pagination cursor from a previous response. |
 
 ```sh
-curl -s 'localhost:8080/events?contract_id=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC&topic={"symbol":"transfer"}&limit=2'
+curl -s 'localhost:8080/events?contract_id=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC,CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSD&type=contract,system&topic={"symbol":"transfer"}&limit=2'
 ```
 
 ```json
@@ -150,7 +150,9 @@ curl -s localhost:8080/events/0001099511627776-0000000001
 ### `GET /contracts/{id}/events`
 
 Convenience wrapper for `GET /events?contract_id={id}`; accepts the same
-remaining query parameters.
+remaining query parameters. Passing an explicit `contract_id` query
+parameter here is rejected with a `400` — the contract already comes from
+the path, so a second value would be ambiguous.
 
 ```sh
 curl -s localhost:8080/contracts/CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC/events?limit=10

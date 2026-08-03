@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -61,6 +63,14 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleContractEvents(w http.ResponseWriter, r *http.Request) {
+	// The contract comes from the path. An explicit contract_id query
+	// parameter would silently contradict (or silently agree with) it, so
+	// reject it outright rather than guess what the caller meant.
+	if r.URL.Query().Has("contract_id") {
+		writeError(w, http.StatusBadRequest,
+			errors.New("contract_id is taken from the path and must not be passed as a query parameter"))
+		return
+	}
 	filter, err := filterFromQuery(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -110,24 +120,30 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
+// maxFilterValues caps how many values a single multi-value filter
+// parameter (contract_id, type) may carry. Beyond this the request is a
+// 400 — a list that long is more like a scan than a filter, and the cap
+// keeps the generated `= ANY(...)` list bounded. Documented in the
+// README's API reference.
+const maxFilterValues = 20
+
 // filterFromQuery parses the shared event-filter query params:
 // contract_id, type, topic, from_ledger, to_ledger, cursor, limit.
+//
+// contract_id and type are multi-value. Values may be given as a single
+// comma-separated list (?contract_id=C1,C2) or as repeated parameters
+// (?contract_id=C1&contract_id=C2), but mixing the two styles in one
+// request is ambiguous and rejected with a 400.
 func filterFromQuery(r *http.Request) (store.EventFilter, error) {
 	q := r.URL.Query()
-	f := store.EventFilter{
-		ContractID: q.Get("contract_id"),
-		Cursor:     q.Get("cursor"),
-	}
+	f := store.EventFilter{Cursor: q.Get("cursor")}
 
-	if f.ContractID != "" && !config.ValidContractID(f.ContractID) {
-		return f, fmt.Errorf("invalid contract_id %q", f.ContractID)
+	var err error
+	if f.ContractID, f.ContractIDs, err = parseMultiContractIDs(q); err != nil {
+		return f, err
 	}
-
-	switch t := q.Get("type"); t {
-	case "", "contract", "system", "diagnostic":
-		f.Type = t
-	default:
-		return f, fmt.Errorf("invalid type %q (want contract|system|diagnostic)", t)
+	if f.Types, err = parseMultiTypes(q); err != nil {
+		return f, err
 	}
 
 	// topic accepts any JSON value; a bare word like `transfer` is treated
@@ -145,7 +161,6 @@ func filterFromQuery(r *http.Request) (store.EventFilter, error) {
 		}
 	}
 
-	var err error
 	if f.FromLedger, err = parseLedgerParam(q.Get("from_ledger"), "from_ledger"); err != nil {
 		return f, err
 	}
@@ -164,6 +179,76 @@ func filterFromQuery(r *http.Request) (store.EventFilter, error) {
 		f.Limit = limit
 	}
 	return f, nil
+}
+
+// parseMultiContractIDs reads the contract_id parameter. Exactly one ID is
+// returned as the scalar ContractID (the historical single-value shape);
+// more than one is returned as ContractIDs for a `= ANY(...)` query.
+func parseMultiContractIDs(q url.Values) (single string, list []string, err error) {
+	parts, err := multiValue(q, "contract_id", func(part string) error {
+		if !config.ValidContractID(part) {
+			return fmt.Errorf("invalid contract_id %q", part)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	switch len(parts) {
+	case 0:
+		return "", nil, nil
+	case 1:
+		return parts[0], nil, nil
+	default:
+		return "", parts, nil
+	}
+}
+
+// parseMultiTypes reads the type parameter (contract|system|diagnostic).
+func parseMultiTypes(q url.Values) ([]string, error) {
+	return multiValue(q, "type", func(part string) error {
+		switch part {
+		case "contract", "system", "diagnostic":
+			return nil
+		default:
+			return fmt.Errorf("invalid type %q (want contract|system|diagnostic)", part)
+		}
+	})
+}
+
+// multiValue flattens a query parameter that may appear either as a single
+// comma-separated value (?p=a,b) or as repeated parameters (?p=a&p=b) into
+// its list of values. Requests that combine both styles are ambiguous and
+// rejected. validate runs on every element; an absent parameter (or one
+// whose values all split to empty) yields no values at all.
+func multiValue(q url.Values, name string, validate func(string) error) ([]string, error) {
+	raw, ok := q[name]
+	if !ok {
+		return nil, nil
+	}
+	if len(raw) > 1 {
+		for _, v := range raw {
+			if strings.Contains(v, ",") {
+				return nil, fmt.Errorf("ambiguous %s: combine repeated parameters and comma-separated values in one request", name)
+			}
+		}
+	}
+	var out []string
+	for _, v := range raw {
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part == "" {
+				continue
+			}
+			if err := validate(part); err != nil {
+				return nil, err
+			}
+			out = append(out, part)
+		}
+	}
+	if len(out) > maxFilterValues {
+		return nil, fmt.Errorf("%s accepts at most %d values, got %d", name, maxFilterValues, len(out))
+	}
+	return out, nil
 }
 
 func parseLedgerParam(raw, name string) (int64, error) {

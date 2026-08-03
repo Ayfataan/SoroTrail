@@ -27,8 +27,19 @@ type Event struct {
 
 // EventFilter narrows a QueryEvents call. Zero values mean "no constraint".
 type EventFilter struct {
+	// ContractID filters events for a single contract. It is sugar kept for
+	// callers that always pass one ID (e.g. handleContractEvents);
+	// ContractIDs is the general form. When both are set they are merged —
+	// an event matching either qualifies.
 	ContractID string
-	Type       string
+	// ContractIDs filters events for any of the listed contracts. When
+	// non-empty the store generates `contract_id = ANY($n)` instead of
+	// `contract_id = $n`, so one query can serve several contracts with a
+	// single cursor and ordering.
+	ContractIDs []string
+	// Types filters by event type (contract|system|diagnostic). Multiple
+	// values are accepted via `type = ANY($n)`.
+	Types []string
 	// Topic matches events whose topics array contains this JSON value at any
 	// position (Postgres jsonb containment).
 	Topic      json.RawMessage
