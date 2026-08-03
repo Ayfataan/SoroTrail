@@ -130,6 +130,21 @@ func filterFromQuery(r *http.Request) (store.EventFilter, error) {
 		return f, fmt.Errorf("invalid type %q (want contract|system|diagnostic)", t)
 	}
 
+	// in_successful_call=true|false filters events by whether they ran in a
+	// successful call. Absent means no constraint; anything else is a 400.
+	if raw := q.Get("in_successful_call"); raw != "" {
+		switch raw {
+		case "true":
+			v := true
+			f.InSuccessfulCall = &v
+		case "false":
+			v := false
+			f.InSuccessfulCall = &v
+		default:
+			return f, fmt.Errorf("invalid in_successful_call %q (want true|false)", raw)
+		}
+	}
+
 	// topic accepts any JSON value; a bare word like `transfer` is treated
 	// as the JSON string "transfer". Matching is exact against the stored
 	// topic entries, e.g. topic={"symbol":"transfer"} for XDR-decoded rows.

@@ -104,6 +104,7 @@ Query parameters (all optional, combinable):
 | --- | --- | --- |
 | `contract_id` | `CDLZ...CYSC` | Only events from this contract. |
 | `type` | `contract` | `contract` \| `system` \| `diagnostic`. |
+| `in_successful_call` | `true` | `true` \| `false`. Only events that ran inside a successful call (`true`), or only diagnostic events from failed calls (`false`). |
 | `topic` | `{"symbol":"transfer"}` | Exact match against any topic position. A bare word is treated as a JSON string. |
 | `from_ledger` | `250000` | Inclusive lower ledger bound. |
 | `to_ledger` | `260000` | Inclusive upper ledger bound. |

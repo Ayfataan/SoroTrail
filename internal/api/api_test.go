@@ -19,6 +19,8 @@ import (
 
 const testContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
 
+func boolPtr(b bool) *bool { return &b }
+
 // stubStore returns canned values and records the filter it was queried with.
 type stubStore struct {
 	store.Store // panic on anything not stubbed below
@@ -102,6 +104,35 @@ func TestListEvents_BareTopicBecomesJSONString(t *testing.T) {
 	assert.JSONEq(t, `"transfer"`, string(st.lastFilter.Topic))
 }
 
+func TestListEvents_InSuccessfulCallFilter(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want *bool
+	}{
+		{"omitted", "", nil},
+		{"true", "true", boolPtr(true)},
+		{"false", "false", boolPtr(false)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &stubStore{}
+			path := "/events"
+			if tc.raw != "" {
+				path += "?in_successful_call=" + tc.raw
+			}
+			resp, body := doGet(t, newTestServer(st, nil), path)
+			require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+			if tc.want == nil {
+				assert.Nil(t, st.lastFilter.InSuccessfulCall)
+				return
+			}
+			require.NotNil(t, st.lastFilter.InSuccessfulCall)
+			assert.Equal(t, *tc.want, *st.lastFilter.InSuccessfulCall)
+		})
+	}
+}
+
 func TestListEvents_BadParams(t *testing.T) {
 	for _, path := range []string{
 		"/events?type=bogus",
@@ -110,6 +141,7 @@ func TestListEvents_BadParams(t *testing.T) {
 		"/events?from_ledger=20&to_ledger=10",
 		"/events?limit=0",
 		"/events?limit=99999",
+		"/events?in_successful_call=maybe",
 	} {
 		t.Run(path, func(t *testing.T) {
 			resp, body := doGet(t, newTestServer(&stubStore{}, nil), path)

@@ -29,6 +29,11 @@ type Event struct {
 type EventFilter struct {
 	ContractID string
 	Type       string
+	// InSuccessfulCall filters events by whether they ran inside a
+	// successful call. nil means "no constraint"; true and false filter
+	// explicitly (true = successful-call events, false = diagnostic
+	// events from failed calls).
+	InSuccessfulCall *bool
 	// Topic matches events whose topics array contains this JSON value at any
 	// position (Postgres jsonb containment).
 	Topic      json.RawMessage
