@@ -249,6 +249,52 @@ func TestPartialIndexForSuccessfulCalls(t *testing.T) {
 		"query filtered to successful calls should return only successful-call rows")
 }
 
+// TestTxHashIndex covers migration 0015_add_tx_hash_index: the btree index
+// over events(tx_hash) backing tx-hash lookups (EventFilter.TxHash and
+// GetEventsByTxHash). Without it every tx_hash predicate degrades to a scan
+// across all partitions.
+//
+// Like TestPartialIndexForSuccessfulCalls, the index's existence and shape
+// are read straight from the catalog. The planner is deliberately not asked
+// whether it would pick the index: on the handful of rows a test seeds, a
+// seq scan is genuinely cheaper, so such an assertion would be flaky by
+// construction.
+func TestTxHashIndex(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	var indexDef string
+	err := st.pool.QueryRow(ctx,
+		`SELECT indexdef FROM pg_indexes WHERE indexname = $1`,
+		"idx_events_tx_hash",
+	).Scan(&indexDef)
+	require.NoError(t, err, "tx_hash index should exist after migrations")
+
+	defWantSubstrings := []struct {
+		name string
+		want string
+	}{
+		{"indexed on events", " ON events"},
+		{"covers tx_hash", "(tx_hash)"},
+	}
+	for _, tc := range defWantSubstrings {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Contains(t, indexDef, tc.want)
+		})
+	}
+
+	var isValid bool
+	err = st.pool.QueryRow(ctx, `
+		SELECT i.indisvalid
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = $1`,
+		"idx_events_tx_hash",
+	).Scan(&isValid)
+	require.NoError(t, err)
+	assert.True(t, isValid, "index should be valid")
+}
+
 func TestGetEvent_NotFound(t *testing.T) {
 	st := testStore(t)
 	_, err := st.GetEvent(context.Background(), "missing", SystemScope())
