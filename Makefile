@@ -8,7 +8,7 @@ BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown
 
 LDFLAGS := -ldflags="-X github.com/sorotrail/sorotrail/internal/buildinfo.Version=$(VERSION) -X github.com/sorotrail/sorotrail/internal/buildinfo.Commit=$(COMMIT) -X github.com/sorotrail/sorotrail/internal/buildinfo.BuildDate=$(BUILD_DATE)"
 
-.PHONY: build run test test-db test-integration lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed
+.PHONY: build run test test-db test-integration lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/sorotrail
@@ -69,6 +69,12 @@ seed:
 
 lint:
 	golangci-lint run
+
+# Regenerate the JSON copy of the OpenAPI spec that internal/api embeds and
+# serves at /openapi.json. api/openapi.yaml is the source of truth; run this
+# after editing it, or pkg/docs.TestSpecCopiesAreIdentical fails the build.
+spec:
+	go run ./cmd/specgen
 
 cover:
 	go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out

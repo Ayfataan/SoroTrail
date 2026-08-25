@@ -12,6 +12,12 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sorotrail/sorotrail/internal/api"
+	"github.com/sorotrail/sorotrail/internal/specgen"
+)
+
+const (
+	yamlSpecPath = "../../api/openapi.yaml"
+	jsonSpecPath = "../../internal/api/openapi.json"
 )
 
 type openAPIDoc struct {
@@ -53,7 +59,7 @@ func TestNoRouteDrift(t *testing.T) {
 
 func readSpec(t *testing.T) openAPIDoc {
 	t.Helper()
-	data, err := os.ReadFile("../../api/openapi.yaml")
+	data, err := os.ReadFile(yamlSpecPath)
 	if err != nil {
 		t.Fatalf("reading openapi spec: %v", err)
 	}
@@ -106,4 +112,29 @@ func routerRoutePairs(t *testing.T) []routePair {
 		return strings.Compare(a.Method, b.Method)
 	})
 	return out
+}
+
+// TestSpecCopiesAreIdentical guards the second half of the drift problem.
+// TestNoRouteDrift keeps the YAML honest about the router, but the copy the
+// binary actually serves is internal/api/openapi.json, and a contributor who
+// edits only the YAML ships documentation nobody sees. Rendering the YAML
+// here and comparing bytes means the committed JSON can only ever be what
+// `make spec` produces.
+func TestSpecCopiesAreIdentical(t *testing.T) {
+	source, err := os.ReadFile(yamlSpecPath)
+	if err != nil {
+		t.Fatalf("reading openapi spec: %v", err)
+	}
+	want, err := specgen.Render(source)
+	if err != nil {
+		t.Fatalf("rendering openapi spec: %v", err)
+	}
+	got, err := os.ReadFile(jsonSpecPath)
+	if err != nil {
+		t.Fatalf("reading embedded openapi spec: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("%s is stale relative to %s; regenerate it with `make spec`",
+			jsonSpecPath, yamlSpecPath)
+	}
 }
