@@ -1596,6 +1596,20 @@ http://localhost:8080/docs/
 No external CDN is required — all assets (HTML, CSS, JS) are compiled into the
 binary via Go's `//go:embed` mechanism.
 
+### Editing the spec
+
+`api/openapi.yaml` is the source of truth. `internal/api/openapi.json` is the
+copy the binary embeds and serves at `/openapi.json`, and it is generated
+rather than hand-edited:
+
+```sh
+make spec
+```
+
+Editing the YAML without regenerating leaves the served spec behind, so
+`TestSpecCopiesAreIdentical` renders the YAML and compares bytes against the
+committed JSON.
+
 ### Route-drift validation
 
 A dedicated test ensures the router and the OpenAPI spec stay in sync:
@@ -1607,6 +1621,23 @@ go test ./pkg/docs/ -run TestNoRouteDrift -v
 The test reads `api/openapi.yaml`, walks the live chi router tree, and fails
 with `t.Fatalf` if the two diverge in either direction. Run it as part of CI
 to catch endpoint/spec drift before it reaches production.
+
+### Error-response validation
+
+Documenting a status the handlers never return is as misleading as omitting
+one they do, so the spec's failure responses are checked against the running
+router rather than reviewed by eye:
+
+```sh
+go test ./internal/api/ -run TestDocumentedErrorsMatchTheHandlers -v
+```
+
+Each case drives a real request through the real router until it produces a
+400, 401, 403, 404, 409, 429, 500, 501 or 503, then requires the spec to
+document that status on that route. Companion tests check the 429 documents
+its `Retry-After` header, the authentication failures name the scheme a
+caller has to satisfy, and every error body reaches the one shared
+`ErrorResponse` envelope through a `$ref` instead of restating it per path.
 
 ## License
 

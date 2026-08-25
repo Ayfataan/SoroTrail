@@ -11,6 +11,15 @@
       "description": "Local development"
     }
   ],
+  "security": [
+    {
+      "TenantAuth": []
+    },
+    {
+      "TenantAuthHeader": []
+    },
+    {}
+  ],
   "paths": {
     "/health": {
       "get": {
@@ -19,6 +28,7 @@
         "tags": [
           "System"
         ],
+        "security": [],
         "responses": {
           "200": {
             "description": "All dependencies healthy",
@@ -109,8 +119,20 @@
               }
             }
           },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
+          },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -129,15 +151,29 @@
             "$ref": "#/components/parameters/ToLedger"
           }
         ],
+        "security": [
+          {
+            "ManagementKey": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Number of events deleted"
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid API key"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -184,10 +220,19 @@
             }
           },
           "304": {
-            "description": "Not modified (conditional GET with matching If-None-Match)"
+            "$ref": "#/components/responses/NotModified"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -269,8 +314,20 @@
               }
             }
           },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
+          },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -327,6 +384,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -364,8 +427,17 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
-            "description": "The address has no recorded events"
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -393,7 +465,16 @@
             }
           },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -418,8 +499,23 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -458,8 +554,20 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -496,8 +604,23 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -527,8 +650,23 @@
           "204": {
             "description": "Deleted"
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -567,8 +705,20 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -607,8 +757,20 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -635,8 +797,8 @@
           }
         ],
         "responses": {
-          "201": {
-            "description": "Success",
+          "200": {
+            "description": "The tenant's refreshed grant list. Not a 201: the response is the whole list, not the created grant.",
             "content": {
               "application/json": {
                 "schema": {
@@ -645,8 +807,20 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -684,11 +858,23 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Deleted"
+          "200": {
+            "description": "The tenant's refreshed grant list. Not a 204: the response carries the remaining grants."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -727,8 +913,20 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -765,8 +963,20 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -798,8 +1008,20 @@
           "204": {
             "description": "Deleted"
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid admin credential"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -864,6 +1086,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -874,16 +1102,21 @@
       "get": {
         "operationId": "livez",
         "summary": "Liveness probe",
-        "description": "Reports only that the process is up. Never touches the database or RPC.",
+        "description": "Reports only that the process is up. Never touches the database or RPC. It therefore has no failure response: a process that cannot answer 200 here cannot answer at all.",
         "tags": [
           "Operations"
         ],
+        "security": [],
         "responses": {
           "200": {
-            "description": "Success"
-          },
-          "500": {
-            "$ref": "#/components/responses/InternalError"
+            "description": "The process is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -892,16 +1125,31 @@
       "get": {
         "operationId": "readyz",
         "summary": "Readiness probe",
-        "description": "Reports whether the database, RPC and schema are usable. 503 when not.",
+        "description": "Reports whether the database, RPC and schema are usable, and whether ingestion has fallen more than 100 ledgers behind the chain head.",
         "tags": [
           "Operations"
         ],
+        "security": [],
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "Every dependency is usable and ingestion is current",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
           },
-          "500": {
-            "$ref": "#/components/responses/InternalError"
+          "503": {
+            "description": "A dependency is unusable or ingestion is lagging. The body names the failing check so the instance can be pulled from the load balancer without reading the logs. This is a degraded-readiness report rather than the shared error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -918,6 +1166,12 @@
           "200": {
             "description": "Success"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -928,16 +1182,39 @@
       "get": {
         "operationId": "metrics",
         "summary": "Prometheus metrics",
-        "description": "Prometheus text-format exposition of ingest, RPC and HTTP metrics.",
+        "description": "Prometheus text-format exposition of ingest, RPC and HTTP metrics. Exempt from rate limiting, so a scrape can never be throttled by the pressure it is there to measure.",
         "tags": [
           "Operations"
         ],
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "The metrics exposition",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "description": "No metrics collector is wired into this server. Plain text rather than the error envelope, because it is written by the route stub ahead of the collector's own handler.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "examples": [
+                    "metrics not enabled"
+                  ]
+                }
+              }
+            }
           }
         }
       }
@@ -959,6 +1236,18 @@
           "200": {
             "description": "Success"
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -976,6 +1265,15 @@
         "responses": {
           "200": {
             "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1002,6 +1300,18 @@
         "responses": {
           "200": {
             "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1032,6 +1342,18 @@
           "200": {
             "description": "Success"
           },
+          "304": {
+            "$ref": "#/components/responses/NotModified"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -1060,6 +1382,18 @@
         "responses": {
           "200": {
             "description": "Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1133,8 +1467,14 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1224,8 +1564,14 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1256,6 +1602,18 @@
           "200": {
             "description": "Success"
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -1273,6 +1631,18 @@
         "responses": {
           "200": {
             "description": "Success"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1292,6 +1662,21 @@
           "200": {
             "description": "Success"
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -1310,6 +1695,18 @@
           "200": {
             "description": "Success"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -1323,8 +1720,23 @@
           "Operations"
         ],
         "responses": {
-          "201": {
-            "description": "Success"
+          "200": {
+            "description": "The tenant's refreshed watch list. Not a 201: the response is the whole list, not the created row."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1352,8 +1764,20 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Success"
+          "200": {
+            "description": "The tenant's refreshed watch list. Not a 204: the response carries the remaining contracts."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1369,15 +1793,26 @@
         "tags": [
           "Operations"
         ],
+        "security": [
+          {
+            "ManagementKey": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Success"
           },
           "401": {
-            "description": "Missing or invalid API key"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       },
@@ -1388,15 +1823,29 @@
         "tags": [
           "Operations"
         ],
+        "security": [
+          {
+            "ManagementKey": []
+          }
+        ],
         "responses": {
-          "201": {
-            "description": "Success"
+          "200": {
+            "description": "The refreshed watch list, plus the ledger ingestion for the new contract will start from. Not a 201: the response is the whole list, not the created row."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
-            "description": "Missing or invalid API key"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1420,15 +1869,32 @@
             }
           }
         ],
+        "security": [
+          {
+            "ManagementKey": []
+          }
+        ],
         "responses": {
-          "204": {
-            "description": "Success"
+          "200": {
+            "description": "The refreshed watch list. Not a 204: the response carries the remaining contracts."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
-            "description": "Missing or invalid API key"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1441,15 +1907,29 @@
         "tags": [
           "Operations"
         ],
+        "security": [
+          {
+            "ManagementKey": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Success"
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid API key"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1473,15 +1953,32 @@
             }
           }
         ],
+        "security": [
+          {
+            "ManagementKey": []
+          }
+        ],
         "responses": {
           "204": {
             "description": "Success"
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
-            "description": "Missing or invalid API key"
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         }
       }
@@ -1503,6 +2000,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1560,16 +2063,20 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
           "501": {
-            "description": "Streaming not configured (broadcaster disabled)",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string",
-                  "example": "streaming not configured"
-                }
-              }
-            }
+            "$ref": "#/components/responses/NotImplemented"
           }
         }
       }
@@ -1605,6 +2112,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
           "500": {
             "$ref": "#/components/responses/InternalError"
           }
@@ -1629,6 +2142,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1669,8 +2188,14 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1720,8 +2245,14 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1753,8 +2284,14 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -1809,8 +2346,14 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -2138,61 +2681,6 @@
           "events"
         ]
       },
-      "ContractSummary": {
-        "type": "object",
-        "properties": {
-          "contract_id": {
-            "type": "string"
-          },
-          "event_count": {
-            "type": "integer",
-            "description": "Total stored events for this contract"
-          },
-          "first_ledger": {
-            "type": "integer",
-            "description": "Oldest ledger with a stored event for this contract"
-          },
-          "last_ledger": {
-            "type": "integer",
-            "description": "Newest ledger with a stored event for this contract"
-          },
-          "last_seen": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Wall-clock time the most recent event was ingested"
-          }
-        },
-        "required": [
-          "contract_id",
-          "event_count",
-          "first_ledger",
-          "last_ledger",
-          "last_seen"
-        ]
-      },
-      "ContractsPage": {
-        "type": "object",
-        "properties": {
-          "contracts": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ContractSummary"
-            }
-          },
-          "count": {
-            "type": "integer",
-            "description": "Number of contracts on this page"
-          },
-          "cursor": {
-            "type": "string",
-            "description": "Present when more results exist; pass back as ?cursor="
-          }
-        },
-        "required": [
-          "contracts",
-          "count"
-        ]
-      },
       "Stats": {
         "type": "object",
         "properties": {
@@ -2385,11 +2873,133 @@
           "duration_ms",
           "created_at"
         ]
+      },
+      "ContractSummary": {
+        "type": "object",
+        "properties": {
+          "contract_id": {
+            "type": "string"
+          },
+          "event_count": {
+            "type": "integer",
+            "description": "Total stored events for this contract"
+          },
+          "first_ledger": {
+            "type": "integer",
+            "description": "Oldest ledger with a stored event for this contract"
+          },
+          "last_ledger": {
+            "type": "integer",
+            "description": "Newest ledger with a stored event for this contract"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Wall-clock time the most recent event was ingested"
+          }
+        },
+        "required": [
+          "contract_id",
+          "event_count",
+          "first_ledger",
+          "last_ledger",
+          "last_seen"
+        ]
+      },
+      "ContractsPage": {
+        "type": "object",
+        "properties": {
+          "contracts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContractSummary"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "description": "Number of contracts on this page"
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Present when more results exist; pass back as ?cursor="
+          }
+        },
+        "required": [
+          "contracts",
+          "count"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "TenantAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The tenant API key issued by POST /admin/tenants/{id}/keys, presented\nas `Authorization: Bearer st_<prefix>_<secret>`. The same key is also\naccepted in an `X-API-Key` header (see TenantAuthHeader); Bearer wins\nwhen both are present.\n\nOnly enforced when the instance runs with MULTI_TENANT=true. On a\nsingle-tenant instance every request is served as an implicit\nwildcard principal and no credential is required, which is why most\noperations list this scheme as optional rather than required.\n"
+      },
+      "TenantAuthHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "The same tenant API key as TenantAuth, presented in a header instead of a Bearer token."
+      },
+      "ManagementKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "The operator's instance-wide management key, configured through the\nAPI_KEY environment variable. It gates the endpoints that mutate\ningestion or read the dead-letter queue, and it is always required on\nthose endpoints — independently of MULTI_TENANT, and independently of\nthe tenant credential above.\n\nWhen API_KEY is unset the server fails closed: those endpoints answer\n503 rather than running unauthenticated.\n"
       }
     },
     "responses": {
+      "NotModified": {
+        "description": "The cached copy is still current. Returned for a conditional GET whose If-None-Match matches the resource's current ETag. The body is empty; the validators are repeated so the client can refresh its cache entry.",
+        "headers": {
+          "ETag": {
+            "description": "The validator that matched.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          "Cache-Control": {
+            "description": "The caching policy for the unchanged resource.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "BadRequest": {
-        "description": "Bad request",
+        "description": "The request could not be parsed or violates a documented constraint — a malformed identifier, an out-of-range limit, an unparseable cursor, or a JSON body the endpoint cannot decode. The message names the offending parameter.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "No credential was presented, or the one presented is malformed,\nunknown or revoked.\n\nWhich credential is missing depends on the endpoint's security\nrequirement: endpoints requiring ManagementKey want the operator's\n`X-API-Key`, while everything else wants the tenant key and only\nrejects when the instance runs with MULTI_TENANT=true.\n",
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "The authentication challenge, per RFC 7235 §4.1 — for example `Bearer realm=\"sorotrail\"`. Present on the tenant-authentication failures; the ManagementKey path answers without a challenge because it accepts no Bearer token.",
+            "schema": {
+              "type": "string",
+              "examples": [
+                "Bearer realm=\"sorotrail\""
+              ]
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The credential is valid but does not entitle the caller to what it asked for: a disabled tenant, a non-admin calling an admin endpoint, or a request naming a contract outside the tenant's grants. Contract IDs are public on-chain identifiers, so a request for an ungranted contract is answered 403 rather than 404.",
         "content": {
           "application/json": {
             "schema": {
@@ -2399,7 +3009,39 @@
         }
       },
       "NotFound": {
-        "description": "Resource not found",
+        "description": "The addressed resource does not exist, or is not visible to the caller. Event lookups answer 404 rather than 403 for an event the caller may not read, so the endpoint cannot be used as an existence oracle. The tenant and admin endpoints also answer 404 when the instance runs single-tenant and those routes are therefore inert.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "The request collides with the current state — a duplicate tenant name, or a tenant attempting to delete the account it is authenticated as.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "The caller exceeded its request quota, or asked to watch more\ncontracts than its quota allows.\n\nRate limiting is per client — keyed on the authenticated tenant where\none exists and on the client IP otherwise — and is only active when\nthe operator configured RATE_LIMIT_RPS or a per-tenant override. The\nprobe and scrape endpoints (/health, /livez, /readyz, /metrics) are\nnever rate limited, so throttling cannot blind an operator to the\nthrottling itself.\n",
+        "headers": {
+          "Retry-After": {
+            "description": "Whole seconds to wait before retrying, per RFC 7231 §7.1.3. Always at least 1, and rounded up from the limiter's own wait-to-next-token estimate.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "examples": [
+                1
+              ]
+            }
+          }
+        },
         "content": {
           "application/json": {
             "schema": {
@@ -2409,7 +3051,30 @@
         }
       },
       "InternalError": {
-        "description": "Internal server error",
+        "description": "The request failed for a reason the caller cannot act on — a store or RPC failure, or a panic caught by the recovery middleware. The message is deliberately generic; the specifics are logged against the request's X-Request-ID rather than returned.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotImplemented": {
+        "description": "The endpoint exists but the feature behind it is not configured on this instance. Returned by the live event stream when the broadcaster is disabled. This one response is plain text rather than the error envelope, because it is written before the endpoint's JSON contract begins.",
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string",
+              "examples": [
+                "streaming not configured"
+              ]
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "The endpoint is temporarily unusable. The management endpoints answer this when API_KEY is unset, failing closed so that writes are never open on a misconfigured instance.",
         "content": {
           "application/json": {
             "schema": {
