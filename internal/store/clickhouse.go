@@ -232,6 +232,10 @@ func (c *ClickHouse) ListDeliveryAttempts(ctx context.Context, subscriptionID in
 	return nil, nil
 }
 
+func (c *ClickHouse) CountDeliveryAttempts(ctx context.Context, subscriptionID int64, owner SubscriptionOwner) (int64, error) {
+	return 0, nil
+}
+
 func (c *ClickHouse) GetContractSpec(ctx context.Context, wasmHash string) ([]byte, error) {
 	return nil, ErrNotFound
 }
@@ -272,6 +276,10 @@ func (c *ClickHouse) DeadLetterEvent(context.Context, DeadLetterInput) (DeadLett
 
 func (c *ClickHouse) ListDeadLetters(context.Context, string, int, string) ([]DeadLetter, string, error) {
 	return nil, "", nil
+}
+
+func (c *ClickHouse) CountDeadLetters(context.Context, string) (int64, error) {
+	return 0, nil
 }
 
 func (c *ClickHouse) GetDeadLetter(context.Context, int64) (DeadLetter, error) {

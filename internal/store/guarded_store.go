@@ -442,6 +442,24 @@ func (s *guardedStore) CountAddressEvents(ctx context.Context, address string) (
 	return total, err
 }
 
+func (s *guardedStore) CountDeadLetters(ctx context.Context, contractID string) (int64, error) {
+	ctx, cancel := s.wrapContext(ctx, "store.CountDeadLetters")
+	defer cancel()
+	start := time.Now()
+	total, err := s.Store.CountDeadLetters(ctx, contractID)
+	s.logSlowQuery("store.CountDeadLetters", start, err)
+	return total, err
+}
+
+func (s *guardedStore) CountDeliveryAttempts(ctx context.Context, subscriptionID int64, owner SubscriptionOwner) (int64, error) {
+	ctx, cancel := s.wrapContext(ctx, "store.CountDeliveryAttempts")
+	defer cancel()
+	start := time.Now()
+	total, err := s.Store.CountDeliveryAttempts(ctx, subscriptionID, owner)
+	s.logSlowQuery("store.CountDeliveryAttempts", start, err)
+	return total, err
+}
+
 func (s *guardedStore) GetAddressSummary(ctx context.Context, address string) (AddressSummary, error) {
 	ctx, cancel := s.wrapContext(ctx, "store.GetAddressSummary")
 	defer cancel()
