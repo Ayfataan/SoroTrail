@@ -31,7 +31,13 @@ type Config struct {
 	RPCURLS []string `env:"RPC_URLS"`
 	// RPCRateLimitRPS caps each provider's request rate (requests/second)
 	// when the failover client is in use. Only read by the failover client.
-	RPCRateLimitRPS       float64       `env:"RPC_RATE_LIMIT_RPS" envDefault:"10"`
+	RPCRateLimitRPS float64 `env:"RPC_RATE_LIMIT_RPS" envDefault:"10"`
+	// RPCRateLimit caps the single-provider client's request rate in
+	// requests/second (RPC_RATE_LIMIT). The default of 10 matches the
+	// public endpoint limit; raise it only against paid plans or
+	// self-hosted RPCs whose allowance actually permits it. Ignored while
+	// RPC_URLS is set (the failover path uses RPC_RATE_LIMIT_RPS).
+	RPCRateLimit          float64       `env:"RPC_RATE_LIMIT" envDefault:"10"`
 	DatabaseURL           string        `env:"DATABASE_URL"`
 	PollInterval          time.Duration `env:"POLL_INTERVAL" envDefault:"5s"`
 	HTTPAddr              string        `env:"HTTP_ADDR" envDefault:":8080"`
@@ -230,6 +236,12 @@ type Config struct {
 	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS" envDefault:""`
 	CORSAllowedMethods []string `env:"CORS_ALLOWED_METHODS" envDefault:"GET,POST,PUT,DELETE,OPTIONS"`
 	CORSAllowedHeaders []string `env:"CORS_ALLOWED_HEADERS" envDefault:"Content-Type,X-API-Key,Accept"`
+	// CORSExposedHeaders is returned as Access-Control-Expose-Headers on
+	// responses to allowed origins so browser JavaScript can read those
+	// response headers. X-Request-ID is set on every response by the API's
+	// request logger (#29), so it is the default; an operator can extend
+	// the list or empty it to suppress the header entirely.
+	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID"`
 }
 
 // Load reads configuration from the environment and validates it.
@@ -364,6 +376,9 @@ func (c Config) Validate() error {
 	}
 	if c.RPCRateLimitRPS <= 0 {
 		return fmt.Errorf("RPC_RATE_LIMIT_RPS must be positive")
+	}
+	if c.RPCRateLimit <= 0 {
+		return fmt.Errorf("RPC_RATE_LIMIT must be positive, got %v", c.RPCRateLimit)
 	}
 	if c.RetentionBatchSize <= 0 {
 		return fmt.Errorf("RETENTION_BATCH_SIZE must be positive")
@@ -573,6 +588,7 @@ func (c Config) LoggableFields() []any {
 		"rpc_base_backoff", c.RPCBaseBackoff,
 		"rpc_max_backoff", c.RPCMaxBackoff,
 		"rpc_jitter", c.RPCJitter,
+		"rpc_rate_limit", c.RPCRateLimit,
 		"database_url", dbURL,
 		"poll_interval", c.PollInterval,
 		"http_addr", c.HTTPAddr,
