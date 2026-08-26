@@ -230,6 +230,12 @@ type Config struct {
 	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS" envDefault:""`
 	CORSAllowedMethods []string `env:"CORS_ALLOWED_METHODS" envDefault:"GET,POST,PUT,DELETE,OPTIONS"`
 	CORSAllowedHeaders []string `env:"CORS_ALLOWED_HEADERS" envDefault:"Content-Type,X-API-Key,Accept"`
+	// CORSExposedHeaders is returned as Access-Control-Expose-Headers on
+	// responses to allowed origins so browser JavaScript can read those
+	// response headers. X-Request-ID is set on every response by the API's
+	// request logger (#29), so it is the default; an operator can extend
+	// the list or empty it to suppress the header entirely.
+	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID"`
 }
 
 // Load reads configuration from the environment and validates it.
