@@ -31,6 +31,7 @@ field halts the process mid-flight; every problem is printed before `os.Exit(1)`
 | `AUDIT_MAX_RPS`             | > 0                     |
 | `AUDIT_MAX_REPAIR_ATTEMPTS` | > 0                     |
 | `AUDIT_FINDING_MAX_LEDGERS` | > 0                     |
+| `RPC_RATE_LIMIT`            | > 0                     |
 | `RATE_LIMIT_RPS`            | >= 0                    |
 | `RATE_LIMIT_BURST`          | >= 0                    |
 

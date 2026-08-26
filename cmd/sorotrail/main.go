@@ -190,7 +190,19 @@ func run() error {
 	// Shared broadcaster for live event streaming across all networks.
 	bcast := broadcast.New(broadcast.DefaultBufferSize)
 
-	rpcClient := rpc.NewHTTPClient(cfg.RPCURL)
+	// Single-provider client: the interval limiter caps the request rate
+	// at RPC_RATE_LIMIT (default 10 req/s, the public endpoint limit) and
+	// the retry wrapper applies the configured backoff, honoring any
+	// Retry-After hint a rate-limiting provider sends (issue #58).
+	rpcClient := rpc.NewRetryClient(
+		rpc.NewHTTPClient(cfg.RPCURL, rpc.WithRateLimitRPS(cfg.RPCRateLimit)),
+		rpc.RetryConfig{
+			MaxAttempts: cfg.RPCMaxAttempts,
+			BaseBackoff: cfg.RPCBaseBackoff,
+			MaxBackoff:  cfg.RPCMaxBackoff,
+			Jitter:      cfg.RPCJitter,
+			Logger:      log,
+		})
 	wh := webhook.NewNotifier(st, log)
 
 	// Wire the spec cache and enricher for spec-decoded event views.
