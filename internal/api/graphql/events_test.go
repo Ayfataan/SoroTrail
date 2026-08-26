@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -227,4 +228,50 @@ func TestGraphQL_ContractsResolver(t *testing.T) {
 	require.Len(t, nodes, 2)
 	assert.Equal(t, "CABC", nodes[0].(map[string]any)["contractId"])
 	assert.Equal(t, float64(2), contracts["totalCount"])
+}
+
+// TestDerefInt covers the nil-safe int32 dereference used to turn
+// optional GraphQL arguments into plain values.
+func TestDerefInt(t *testing.T) {
+	five := int32(5)
+	min32 := int32(math.MinInt32)
+
+	tests := []struct {
+		name string
+		in   *int32
+		want int
+	}{
+		{name: "non-nil pointer returns its value", in: &five, want: 5},
+		{name: "nil pointer returns zero", in: nil, want: 0},
+		{name: "int32 minimum survives the conversion", in: &min32, want: math.MinInt32},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, derefInt(tt.in))
+		})
+	}
+}
+
+// TestDerefInt64 mirrors TestDerefInt for the int64 variant used
+// where GraphQL arguments carry wider optional integers.
+func TestDerefInt64(t *testing.T) {
+	five := int64(5)
+	min32 := int64(math.MinInt32)
+
+	tests := []struct {
+		name string
+		in   *int64
+		want int64
+	}{
+		{name: "non-nil pointer returns its value", in: &five, want: 5},
+		{name: "nil pointer returns zero", in: nil, want: 0},
+		{name: "int32 minimum survives the conversion", in: &min32, want: math.MinInt32},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, derefInt64(tt.in))
+		})
+	}
 }
