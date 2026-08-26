@@ -782,6 +782,11 @@ memory usage stays bounded regardless of the ledger span.
   total request rate at ~10 req/s regardless, so the parallelism only
   helps when the RPC has headroom past the public ceiling. The
   single-batch path (`<=25` watched contracts) is unchanged.
+  `SWEEP_CONCURRENCY` also bounds database backpressure: each fanned-out
+  goroutine writes its page before fetching its next one, so it never
+  runs more concurrent `UpsertEvents` calls than this limit — a slow
+  store lengthens each goroutine's cycle rather than piling up unbounded
+  concurrent writes.
 - **Reorg detection** (`REORG_CONFIRMATION_WINDOW`, default `64`): after
   every successful ingest cycle the Run loop re-fetches the range
   `[frontier - REORG_CONFIRMATION_WINDOW, frontier - 1]` and replaces
