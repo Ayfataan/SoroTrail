@@ -672,6 +672,14 @@ func (ing *Ingester) windowSweep(ctx context.Context, start uint32, batches [][]
 	// of which error races out first.
 	var ledgerOutOfRange atomic.Bool
 	g, gctx := errgroup.WithContext(ctx)
+	// SweepConcurrency also doubles as the DB backpressure knob: each
+	// sweepBatch goroutine calls persistEvents (a synchronous UpsertEvents)
+	// before fetching its next page, so this same SetLimit caps how many
+	// UpsertEvents calls can be in flight at once — a goroutine can't start
+	// a new RPC fetch (and so can't queue a new write) until its slot frees
+	// up, which requires its current write to finish. No separate DB
+	// semaphore is needed; a slow store just makes each goroutine's cycle
+	// take longer, which throttles the RPC fetch rate to match.
 	g.SetLimit(ing.opts.SweepConcurrency)
 	for _, filters := range batches {
 		filters := filters
