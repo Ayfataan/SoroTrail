@@ -383,3 +383,263 @@ func TestFormatEventID(t *testing.T) {
 		}
 	})
 }
+
+// scI64 constructs a signed 64-bit ScVal. i64 is the most common signed
+// type in Soroban host output, so exercising it round-trips without byte
+// loss is important for data fidelity in backfilled events.
+func scI64(n int64) xdr.ScVal {
+	i := xdr.Int64(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvI64, I64: &i}
+}
+
+// scBool constructs a boolean ScVal. Bool is uncommon in event data but
+// appears in contract return values and storage flags.
+func scBool(b bool) xdr.ScVal {
+	return xdr.ScVal{Type: xdr.ScValTypeScvBool, B: &b}
+}
+
+// scU32 constructs an unsigned 32-bit ScVal. u32 is used for counters
+// and small enumerations in Soroban contracts.
+func scU32(n uint32) xdr.ScVal {
+	u := xdr.Uint32(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &u}
+}
+
+// scI32 constructs a signed 32-bit ScVal. i32 appears in legacy contracts
+// and error code representations.
+func scI32(n int32) xdr.ScVal {
+	i := xdr.Int32(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvI32, I32: &i}
+}
+
+// scTimepoint constructs a timepoint ScVal. Timepoints are uint64
+// timestamps used in Soroban's time-based authorization and scheduling.
+func scTimepoint(n uint64) xdr.ScVal {
+	tp := xdr.TimePoint(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvTimepoint, Timepoint: &tp}
+}
+
+// scDuration constructs a duration ScVal. Durations are uint64 second
+// counts used in Soroban's TTL and contract scheduling.
+func scDuration(n uint64) xdr.ScVal {
+	d := xdr.Duration(n)
+	return xdr.ScVal{Type: xdr.ScValTypeScvDuration, Duration: &d}
+}
+
+// scBytes constructs a byte-string ScVal. Bytes carry opaque binary data
+// such as hashes and serialized payloads in Soroban events.
+func scBytes(b []byte) xdr.ScVal {
+	sb := xdr.ScBytes(b)
+	return xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &sb}
+}
+
+// scMap constructs a map ScVal. Maps are the key-value container for
+// Soroban contract storage and structured event data.
+func scMap(entries ...xdr.ScMapEntry) xdr.ScVal {
+	m := xdr.ScMap(entries)
+	p := &m
+	return xdr.ScVal{Type: xdr.ScValTypeScvMap, Map: &p}
+}
+
+// TestEncodeScVal verifies that encodeScVal round-trips every supported
+// ScVal type: encoding produces deterministic base64, decoding that base64
+// recovers the original value, and re-encoding it yields the same base64.
+// An invalid ScVal must return ok=false rather than silently emitting
+// an empty string, which would propagate through event payloads and
+// create phantom empty XDR columns in the store.
+func TestEncodeScVal(t *testing.T) {
+	tests := []struct {
+		name    string
+		val     xdr.ScVal
+		wantErr bool
+	}{
+		{
+			// U64 is the most common numeric type in Soroban event data;
+			// a zero value ensures the encode path handles edge magnitudes.
+			name: "u64 zero",
+			val:  scU64(0),
+		},
+		{
+			name: "u64 large",
+			val:  scU64(1<<64 - 1),
+		},
+		{
+			// Negative i64 values occupy the full two's-complement range
+			// and must not lose their sign during marshal/unmarshal.
+			name: "i64 negative",
+			val:  scI64(-42),
+		},
+		{
+			name: "i64 zero",
+			val:  scI64(0),
+		},
+		{
+			// u32 and i32 appear in legacy contract interfaces and small
+			// counters; verifying their round-trip prevents truncation bugs.
+			name: "u32",
+			val:  scU32(255),
+		},
+		{
+			name: "i32 negative",
+			val:  scI32(-1),
+		},
+		{
+			// Booleans are rare in event data but appear in storage flags;
+			// both polarities must round-trip.
+			name: "bool true",
+			val:  scBool(true),
+		},
+		{
+			name: "bool false",
+			val:  scBool(false),
+		},
+		{
+			// Void carries no payload but still has a type discriminant;
+			// the encoder must emit the type byte without panicking on nil.
+			name: "void",
+			val:  xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+		},
+		{
+			// Symbols are Soroban's interned string type used for function
+			// names and event discriminants; round-trip preserves the string.
+			name: "symbol",
+			val:  scSymbol("transfer"),
+		},
+		{
+			// Strings carry variable-length text in event payloads.
+			name: "string",
+			val:  scString("hello world"),
+		},
+		{
+			// Addresses are 32-byte contract/account identifiers wrapped
+			// in a type discriminator; byte-level fidelity is critical.
+			name: "address",
+			val:  scAddress("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACF"),
+		},
+		{
+			// Timepoints are uint64 timestamps; the encoder must not
+			// confuse them with regular u64 values.
+			name: "timepoint",
+			val:  scTimepoint(1700000000),
+		},
+		{
+			// Durations are uint64 second counts used in TTL fields;
+			// structurally identical to timepoints on the wire but with
+			// a distinct type tag.
+			name: "duration",
+			val:  scDuration(3600),
+		},
+		{
+			// Bytes carry opaque binary data such as hashes; empty bytes
+			// are a valid edge case that must not confuse the encoder.
+			name: "bytes empty",
+			val:  scBytes([]byte{}),
+		},
+		{
+			name: "bytes with content",
+			val:  scBytes([]byte{0xDE, 0xAD, 0xBE, 0xEF}),
+		},
+		{
+			// Nested vecs exercise the recursive marshal path; a vec of
+			// mixed types ensures the encoder handles heterogeneous data.
+			name: "vec nested",
+			val:  scVec(scU64(1), scSymbol("a"), scBool(false)),
+		},
+		{
+			// Empty vecs are valid Soroban values that must not produce
+			// nil-pointer panics during marshal.
+			name: "vec empty",
+			val:  scVec(),
+		},
+		{
+			// Maps are key-value containers; the encoder must preserve
+			// insertion order and handle heterogeneous key/value types.
+			name: "map",
+			val: scMap(
+				xdr.ScMapEntry{
+					Key: scSymbol("name"),
+					Val: scString("soroban"),
+				},
+				xdr.ScMapEntry{
+					Key: scSymbol("version"),
+					Val: scU64(1),
+				},
+			),
+		},
+		{
+			// U128 and I128 are 128-bit integers serialized as two 64-bit
+			// halves; byte order across Hi/Lo must survive the round-trip.
+			name: "u128",
+			val: xdr.ScVal{
+				Type: xdr.ScValTypeScvU128,
+				U128: &xdr.UInt128Parts{Hi: 1, Lo: 2},
+			},
+		},
+		{
+			name: "i128",
+			val: xdr.ScVal{
+				Type: xdr.ScValTypeScvI128,
+				I128: &xdr.Int128Parts{Hi: -1, Lo: 1},
+			},
+		},
+		{
+			// U256 carries the largest fixed-size integer; all four 64-bit
+			// limbs must be preserved in the correct order.
+			name: "u256",
+			val: xdr.ScVal{
+				Type: xdr.ScValTypeScvU256,
+				U256: &xdr.UInt256Parts{HiHi: 1, HiLo: 2, LoHi: 3, LoLo: 4},
+			},
+		},
+		{
+			// ScError carries contract-level error metadata; the type tag
+			// and error code must survive the round-trip.
+			name: "error",
+			val: xdr.ScVal{
+				Type: xdr.ScValTypeScvError,
+				Error: &xdr.ScError{
+					Type:         xdr.ScErrorTypeSceContract,
+					ContractCode: ptr(xdr.Uint32(5)),
+				},
+			},
+		},
+		{
+			// A ScVal with a type discriminant that no marshal arm handles
+			// must cause encodeScVal to return false rather than silently
+			// emitting an empty string that would corrupt event payloads.
+			name:    "invalid type discriminant",
+			val:     xdr.ScVal{Type: xdr.ScValType(255)},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := encodeScVal(tt.val)
+			if tt.wantErr {
+				assert.False(t, ok, "encodeScVal must return false for an invalid ScVal")
+				assert.Empty(t, got, "error path must return empty string, not partial output")
+				return
+			}
+
+			require.True(t, ok, "encodeScVal should succeed for %s", tt.name)
+			require.NotEmpty(t, got, "encoded base64 must not be empty")
+
+			// Round-trip: decode the base64 back into a ScVal and re-encode
+			// it. The two encodings must be identical because XDR marshal
+			// is deterministic — any difference means a fidelity bug.
+			var decoded xdr.ScVal
+			require.NoError(t, xdr.SafeUnmarshalBase64(got, &decoded),
+				"the base64 from encodeScVal must be valid XDR")
+
+			got2, ok2 := encodeScVal(decoded)
+			require.True(t, ok2, "re-encoding decoded ScVal must succeed")
+			assert.Equal(t, got, got2,
+				"round-trip through decode and encode must return the original base64")
+		})
+	}
+}
+
+// ptr is a tiny helper that returns a pointer to its argument, keeping
+// inline test fixtures concise without importing a generics package.
+func ptr[T any](v T) *T { return &v }
