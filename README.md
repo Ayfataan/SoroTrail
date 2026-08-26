@@ -1639,6 +1639,24 @@ its `Retry-After` header, the authentication failures name the scheme a
 caller has to satisfy, and every error body reaches the one shared
 `ErrorResponse` envelope through a `$ref` instead of restating it per path.
 
+### Parameter validation
+
+A parameter documented with the wrong bound is worse than one documented with
+no bound at all: a generated client refuses a legal request before it is ever
+sent. The declared constraints are therefore checked against the running
+handlers rather than reviewed by eye:
+
+```sh
+go test ./internal/api/ -run TestDeclaredBoundsMatchTheHandlers -v
+```
+
+The test reads each parameter's `minimum`, `maximum`, `maxLength` and `enum`
+out of the shipped spec and drives the real router at those edges, requiring
+the handler to accept the boundary value and reject the one immediately
+outside it. Companion tests check that each enum is exactly the set the
+parsing code allows, that required parameters really are refused when absent,
+and that no parameter is documented which the handler discards.
+
 ## License
 
 [Apache-2.0](LICENSE)
