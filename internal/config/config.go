@@ -197,6 +197,23 @@ type Config struct {
 	// disables the cap — identical to the pre-cap behavior.
 	MaxEventsPerCycle uint `env:"MAX_EVENTS_PER_CYCLE"`
 
+	// Event write batching and backpressure. BATCH_SIZE caps the number of
+	// events in each store write (UpsertEvents), splitting a fetched page
+	// into smaller chunks so high-volume chains don't land one giant batch
+	// on the DB at once. Zero (the default) keeps the historical single-
+	// write-per-page behavior bit-for-bit.
+	//
+	// When BATCH_SIZE is set AND BATCH_TARGET_LATENCY is set, the page's
+	// chunk size becomes adaptive: writes measured over the latency budget
+	// cause the chunk size to shrink and a backpressure sleep
+	// (BATCH_MAX_BACKOFF) to be inserted between writes, so a strapped
+	// database gets room to drain rather than being hammered at peak.
+	// BATCH_TARGET_LATENCY zero (the default) means the chunk size is
+	// fixed at BATCH_SIZE and no backpressure is applied.
+	BatchSize          uint          `env:"BATCH_SIZE"`
+	BatchTargetLatency time.Duration `env:"BATCH_TARGET_LATENCY"`
+	BatchMaxBackoff    time.Duration `env:"BATCH_MAX_BACKOFF" envDefault:"1s"`
+
 	// ReorgConfirmationWindow is the number of ledgers behind the ingest
 	// frontier that get re-scanned on a periodic basis to detect and
 	// repair RPC-side reorgs. Once a ledger is more than this many ledgers
@@ -439,6 +456,17 @@ func (c Config) Validate() error {
 	}
 	// MAX_EVENTS_PER_CYCLE needs no explicit rule: the env parser rejects
 	// negatives (uint), and zero is the documented "disabled" value.
+	// BATCH_TARGET_LATENCY and BATCH_MAX_BACKOFF tune the batching
+	// behavior that only exists when BATCH_SIZE is set, but tolerating
+	// them when batching is off (a config that sets a budget but forgets
+	// the size) is safer than rejecting it — the operator sees a warning
+	// at startup rather than a crash loop only during a deploy review.
+	if c.BatchSize > 0 && c.BatchTargetLatency < 0 {
+		return fmt.Errorf("BATCH_TARGET_LATENCY must be non-negative, got %s", c.BatchTargetLatency)
+	}
+	if c.BatchMaxBackoff < 0 {
+		return fmt.Errorf("BATCH_MAX_BACKOFF must be non-negative, got %s", c.BatchMaxBackoff)
+	}
 	if c.ReorgConfirmationWindow > 0 && c.ReorgRescanInterval <= 0 {
 		return fmt.Errorf("REORG_RESCAN_INTERVAL must be positive when REORG_CONFIRMATION_WINDOW is set")
 	}
@@ -609,6 +637,9 @@ func (c Config) LoggableFields() []any {
 		"shutdown_timeout", c.ShutdownTimeout,
 		"sweep_concurrency", c.SweepConcurrency,
 		"max_events_per_cycle", c.MaxEventsPerCycle,
+		"batch_size", c.BatchSize,
+		"batch_target_latency", c.BatchTargetLatency,
+		"batch_max_backoff", c.BatchMaxBackoff,
 		"reorg_confirmation_window", c.ReorgConfirmationWindow,
 		"reorg_rescan_interval", c.ReorgRescanInterval,
 		"export_max_range", c.ExportMaxRange,

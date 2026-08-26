@@ -26,6 +26,7 @@ var envKeys = []string{
 	"SHUTDOWN_TIMEOUT",
 	"INGESTION_LOCK_ENABLED",
 	"MAX_EVENTS_PER_CYCLE",
+	"BATCH_SIZE", "BATCH_TARGET_LATENCY", "BATCH_MAX_BACKOFF",
 	"MULTI_TENANT", "MULTI_TENANT_MAX_WATCHED", "MULTI_TENANT_USAGE_FLUSH",
 	"MULTI_TENANT_STREAM_SCOPE_SYNC", "MULTI_TENANT_BOOTSTRAP_KEY",
 	"RETENTION_MAX_AGE", "RETENTION_MIN_LEDGER", "RETENTION_BATCH_SIZE",
@@ -541,6 +542,43 @@ func TestLoad(t *testing.T) {
 				"MAX_EVENTS_PER_CYCLE": "-1",
 			},
 			wantErr: "MaxEventsPerCycle",
+		},
+
+		// --- event batch sizing / backpressure -------------------------------------
+		{
+			name: "BATCH_SIZE defaults to disabled",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/db",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, uint(0), c.BatchSize,
+					"zero is the documented 'batching disabled' default")
+				assert.Equal(t, time.Duration(0), c.BatchTargetLatency)
+				assert.Equal(t, time.Second, c.BatchMaxBackoff,
+					"BatchMaxBackoff has a 1s default")
+			},
+		},
+		{
+			name: "BATCH_SIZE parsed with target latency and backoff",
+			env: map[string]string{
+				"DATABASE_URL":         "postgres://localhost/db",
+				"BATCH_SIZE":           "500",
+				"BATCH_TARGET_LATENCY": "50ms",
+				"BATCH_MAX_BACKOFF":    "2s",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, uint(500), c.BatchSize)
+				assert.Equal(t, 50*time.Millisecond, c.BatchTargetLatency)
+				assert.Equal(t, 2*time.Second, c.BatchMaxBackoff)
+			},
+		},
+		{
+			name: "negative BATCH_MAX_BACKOFF rejected",
+			env: map[string]string{
+				"DATABASE_URL":      "postgres://localhost/db",
+				"BATCH_MAX_BACKOFF": "-1s",
+			},
+			wantErr: "BATCH_MAX_BACKOFF must be non-negative",
 		},
 
 		// --- missing/invalid env combinations (gap coverage) -----------------------
