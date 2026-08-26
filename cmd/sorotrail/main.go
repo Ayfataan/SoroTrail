@@ -328,6 +328,7 @@ func run() error {
 		AllowedOrigins: cfg.CORSAllowedOrigins,
 		AllowedMethods: cfg.CORSAllowedMethods,
 		AllowedHeaders: cfg.CORSAllowedHeaders,
+		ExposedHeaders: cfg.CORSExposedHeaders,
 	})
 
 	// GraphQL transport: reads against the same store + spec enricher
