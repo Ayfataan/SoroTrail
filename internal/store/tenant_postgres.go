@@ -157,7 +157,7 @@ func (p *Postgres) RevokeContract(ctx context.Context, tenantID int64, contractI
 }
 
 func (p *Postgres) ListGrants(ctx context.Context, tenantID int64) ([]string, error) {
-	return p.contractIDs(ctx,
+	return p.queryContractIDs(ctx,
 		`SELECT contract_id FROM tenant_contract_grants WHERE tenant_id = $1 ORDER BY contract_id`,
 		tenantID)
 }
@@ -266,18 +266,31 @@ func (p *Postgres) RemoveTenantWatchedContract(ctx context.Context, tenantID int
 }
 
 func (p *Postgres) ListTenantWatchedContracts(ctx context.Context, tenantID int64) ([]string, error) {
-	return p.contractIDs(ctx,
+	return p.queryContractIDs(ctx,
 		`SELECT contract_id FROM tenant_watched_contracts WHERE tenant_id = $1 ORDER BY contract_id`,
 		tenantID)
 }
 
-func (p *Postgres) contractIDs(ctx context.Context, query string, args ...any) ([]string, error) {
+// queryContractIDs runs query — whose first column is a contract id — and
+// projects the resulting row set into a slice via contractIDs. Ordering
+// and de-duplication are the query's job: callers pass ORDER BY and rely
+// on their tables' constraints, so this method only translates the rows
+// Postgres returns into a slice without reinterpreting them.
+func (p *Postgres) queryContractIDs(ctx context.Context, query string, args ...any) ([]string, error) {
 	rows, err := p.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing contract IDs: %w", err)
 	}
 	defer rows.Close()
+	return contractIDs(rows)
+}
 
+// contractIDs projects the id column out of a row set, preserving row
+// order and duplicates: the caller's ORDER BY is what makes the result
+// deterministic, and any de-duplication happens in SQL, not here. It
+// returns an empty, non-nil slice when there are no rows, so callers can
+// distinguish "nothing matched" from "query never ran".
+func contractIDs(rows pgx.Rows) ([]string, error) {
 	ids := []string{}
 	for rows.Next() {
 		var id string
