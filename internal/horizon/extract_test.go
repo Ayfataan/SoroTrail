@@ -2,6 +2,7 @@ package horizon
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -295,4 +296,90 @@ func TestExtract_StringlyMalformed(t *testing.T) {
 		Hash: "hX", ResultMetaXDR: strings.Repeat("!", 64),
 	})
 	assert.Error(t, err)
+}
+
+// TestFormatEventID covers the backfill primary key. The zero-padding is
+// load-bearing, not cosmetic: the id doubles as a sort key, so
+// lexicographic order must match chronological order — which only holds
+// while every numeric component keeps its fixed width. The width is a
+// minimum, so the largest ledger/op/event values must pass through
+// un-truncated rather than overflowing the format.
+func TestFormatEventID(t *testing.T) {
+	tests := []struct {
+		name       string
+		txHash     string
+		ledger     int64
+		opIndex    int32
+		eventIndex int32
+		want       string
+	}{
+		{
+			name:       "matches the documented TOID shape and width",
+			txHash:     "abc123",
+			ledger:     123456,
+			opIndex:    12,
+			eventIndex: 34,
+			want:       "abc123-00000000000000123456-00012-00034",
+		},
+		{
+			// Single-digit components padded to full width; an unpadded
+			// id like "1-1-1" would sort before "1-0-0" and break
+			// cursor walks.
+			name:       "small values are zero-padded to full width",
+			txHash:     "tx",
+			ledger:     1,
+			opIndex:    1,
+			eventIndex: 1,
+			want:       "tx-00000000000000000001-00001-00001",
+		},
+		{
+			// %020d / %05d are minimum widths: the largest representable
+			// values must come out verbatim, never truncated or wrapped.
+			name:       "maximum values do not overflow the format",
+			txHash:     "max",
+			ledger:     math.MaxInt64,
+			opIndex:    math.MaxInt32,
+			eventIndex: math.MaxInt32,
+			want:       "max-09223372036854775807-2147483647-2147483647",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatEventID(tt.txHash, tt.ledger, tt.opIndex, tt.eventIndex)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	// Crossing a digit boundary (9 → 10, 99 → 100) is where unpadded ids
+	// break: "10" sorts before "9" lexicographically. The padded id must
+	// keep sorting in numeric order for every component.
+	t.Run("lexicographic order matches numeric order", func(t *testing.T) {
+		pairs := []struct {
+			name      string
+			numericLo string
+			numericHi string
+		}{
+			{
+				name:      "ledger crosses a digit boundary",
+				numericLo: formatEventID("tx", 9, 0, 0),
+				numericHi: formatEventID("tx", 10, 0, 0),
+			},
+			{
+				name:      "op index crosses a digit boundary",
+				numericLo: formatEventID("tx", 1, 9, 0),
+				numericHi: formatEventID("tx", 1, 10, 0),
+			},
+			{
+				name:      "event index crosses a digit boundary",
+				numericLo: formatEventID("tx", 1, 0, 9),
+				numericHi: formatEventID("tx", 1, 0, 10),
+			},
+		}
+		for _, p := range pairs {
+			t.Run(p.name, func(t *testing.T) {
+				assert.Less(t, p.numericLo, p.numericHi,
+					"the id of the smaller component must sort first")
+			})
+		}
+	})
 }
