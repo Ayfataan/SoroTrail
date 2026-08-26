@@ -139,6 +139,9 @@ func (s *Server) handleListSubscriptions(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, errors.New("listing subscriptions failed"))
 		return
 	}
+	// The whole owner-scoped list is returned on one page, so the total
+	// is just the page size; no separate count query is needed.
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", len(subs)))
 	writeJSON(w, http.StatusOK, subs)
 }
 
@@ -256,6 +259,16 @@ func (s *Server) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, errors.New("listing delivery attempts failed"))
 		return
 	}
+
+	// Total matching count (ignoring the limit) as a response header,
+	// following the events pattern: a failed count is logged and the
+	// header omitted, never a failed request.
+	if total, cerr := s.store.CountDeliveryAttempts(r.Context(), id, owner); cerr != nil {
+		loggerFromContext(r.Context()).Warn("counting delivery attempts for X-Total-Count", "error", cerr)
+	} else {
+		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
+	}
+
 	if r.URL.Query().Get("envelope") == "true" {
 		if attempts == nil {
 			attempts = []store.DeliveryAttempt{}

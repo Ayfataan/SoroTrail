@@ -139,6 +139,7 @@ type fakeTenants struct {
 	tenants map[int64]store.Tenant
 	grants  map[int64][]string
 	keys    map[string]keyRecord
+	watched map[int64][]string
 
 	usage map[int64][]store.TenantUsage
 }
@@ -154,6 +155,7 @@ func newFakeTenants() *fakeTenants {
 		tenants: map[int64]store.Tenant{},
 		grants:  map[int64][]string{},
 		keys:    map[string]keyRecord{},
+		watched: map[int64][]string{},
 		usage:   map[int64][]store.TenantUsage{},
 	}
 }
@@ -196,6 +198,40 @@ func (f *fakeTenants) GetTenant(_ context.Context, id int64) (store.Tenant, erro
 
 func (f *fakeTenants) ListGrants(_ context.Context, id int64) ([]string, error) {
 	return f.grants[id], nil
+}
+func (f *fakeTenants) ListTenants(_ context.Context) ([]store.Tenant, error) {
+	out := make([]store.Tenant, 0, len(f.tenants))
+	for _, t := range f.tenants {
+		out = append(out, t)
+	}
+	return out, nil
+}
+func (f *fakeTenants) ListAPIKeys(_ context.Context, tenantID int64) ([]store.APIKey, error) {
+	var out []store.APIKey
+	for _, rec := range f.keys {
+		if rec.tenantID == tenantID {
+			out = append(out, store.APIKey{ID: rec.id, TenantID: rec.tenantID})
+		}
+	}
+	return out, nil
+}
+func (f *fakeTenants) ListTenantWatchedContracts(_ context.Context, tenantID int64) ([]string, error) {
+	return f.watched[tenantID], nil
+}
+func (f *fakeTenants) AddTenantWatchedContract(_ context.Context, t store.Tenant, contractID string, _ int) error {
+	f.watched[t.ID] = append(f.watched[t.ID], contractID)
+	return nil
+}
+func (f *fakeTenants) RemoveTenantWatchedContract(_ context.Context, tenantID int64, contractID string) error {
+	list := f.watched[tenantID]
+	out := list[:0]
+	for _, c := range list {
+		if c != contractID {
+			out = append(out, c)
+		}
+	}
+	f.watched[tenantID] = out
+	return nil
 }
 func (f *fakeTenants) TouchAPIKey(context.Context, int64) error { return nil }
 func (f *fakeTenants) AddUsage(_ context.Context, _ time.Time, deltas map[int64]store.UsageDelta) error {
@@ -932,6 +968,13 @@ func (s *subStore) ListDeliveryAttempts(ctx context.Context, id int64, _ int, ow
 	return []store.DeliveryAttempt{{SubscriptionID: id}}, nil
 }
 
+func (s *subStore) CountDeliveryAttempts(ctx context.Context, id int64, owner store.SubscriptionOwner) (int64, error) {
+	if _, err := s.GetSubscription(ctx, id, owner); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
 // newSubFixture is newTenantFixture with a subscription-aware store.
 func newSubFixture(t *testing.T) (*tenantFixture, *subStore) {
 	t.Helper()
@@ -1136,4 +1179,39 @@ func TestSubscriptionOwnerZeroValueDenies(t *testing.T) {
 		"the zero owner restricts to tenant 0, which no bigserial row can be")
 	assert.True(t, store.AllSubscriptions().IsAll())
 	assert.Equal(t, int64(7), store.OwnedBy(7).TenantID())
+}
+
+// TestTenantListEndpoints_TotalCountHeader covers the X-Total-Count
+// contract on the admin and self-service list endpoints. All of them
+// return the full list on one page, so the total is the page length.
+func TestTenantListEndpoints_TotalCountHeader(t *testing.T) {
+	f := newTenantFixture(t)
+
+	t.Run("admin tenant list reports the number of tenants", func(t *testing.T) {
+		rec := f.get(t, f.keyAdmin, "/admin/tenants")
+		require.Equal(t, http.StatusOK, rec.Code, bodyString(t, rec))
+		assert.Equal(t, "5", rec.Header().Get("X-Total-Count"))
+	})
+
+	t.Run("admin grant list reports the number of grants", func(t *testing.T) {
+		rec := f.get(t, f.keyAdmin, "/admin/tenants/1/grants")
+		require.Equal(t, http.StatusOK, rec.Code, bodyString(t, rec))
+		assert.Equal(t, "1", rec.Header().Get("X-Total-Count"),
+			"tenant 1 holds exactly one grant")
+	})
+
+	t.Run("admin key list reports the number of keys", func(t *testing.T) {
+		rec := f.get(t, f.keyAdmin, "/admin/tenants/1/keys")
+		require.Equal(t, http.StatusOK, rec.Code, bodyString(t, rec))
+		assert.Equal(t, "1", rec.Header().Get("X-Total-Count"),
+			"addTenant mints exactly one key per tenant")
+	})
+
+	t.Run("tenant watch list reports the number of watched contracts", func(t *testing.T) {
+		// Seed two claims directly, then read them back through the API.
+		f.tenants.watched[1] = []string{contractA, contractB}
+		rec := f.get(t, f.keyA, "/tenant/watch")
+		require.Equal(t, http.StatusOK, rec.Code, bodyString(t, rec))
+		assert.Equal(t, "2", rec.Header().Get("X-Total-Count"))
+	})
 }

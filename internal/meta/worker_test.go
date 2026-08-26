@@ -111,6 +111,7 @@ func (s *stubStore) DeadLetterEvent(context.Context, store.DeadLetterInput) (sto
 func (s *stubStore) ListDeadLetters(context.Context, string, int, string) ([]store.DeadLetter, string, error) {
 	return nil, "", nil
 }
+func (s *stubStore) CountDeadLetters(context.Context, string) (int64, error) { return 0, nil }
 func (s *stubStore) GetDeadLetter(context.Context, int64) (store.DeadLetter, error) {
 	return store.DeadLetter{}, store.ErrNotFound
 }
@@ -185,6 +186,9 @@ func (s *stubStore) RecordDeliveryAttempt(_ context.Context, a store.DeliveryAtt
 }
 func (s *stubStore) ListDeliveryAttempts(context.Context, int64, int, store.SubscriptionOwner) ([]store.DeliveryAttempt, error) {
 	return nil, nil
+}
+func (s *stubStore) CountDeliveryAttempts(context.Context, int64, store.SubscriptionOwner) (int64, error) {
+	return 0, nil
 }
 func (s *stubStore) DeleteEventsBeforeLedger(context.Context, int64) (int64, error) { return 0, nil }
 func (s *stubStore) DeleteEventsBefore(context.Context, int64, time.Time, int) (int64, error) {

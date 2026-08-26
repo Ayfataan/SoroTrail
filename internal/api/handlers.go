@@ -1463,7 +1463,10 @@ func (s *Server) handleListContracts(w http.ResponseWriter, r *http.Request) {
 	total, cerr := s.store.CountContracts(r.Context(), f)
 	if cerr != nil {
 		loggerFromContext(r.Context()).Warn("counting contracts for X-Total-Count", "error", cerr)
-	} else if total > 0 {
+	} else {
+		// The header is set even for an empty result set: a client that
+		// reads "0" learns the endpoint is healthy and there is simply
+		// nothing to page, whereas an absent header is ambiguous.
 		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
 	}
 	if items == nil {
@@ -1519,6 +1522,16 @@ func (s *Server) handleListDeadLetters(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, errors.New("listing dead letters failed"))
 		return
 	}
+
+	// Total matching count (ignoring pagination) as a response header,
+	// following the events pattern exactly: a failed count is logged and
+	// the header omitted, never a failed request.
+	if total, cerr := s.store.CountDeadLetters(r.Context(), f.ContractID); cerr != nil {
+		loggerFromContext(r.Context()).Warn("counting dead letters for X-Total-Count", "error", cerr)
+	} else {
+		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
+	}
+
 	writeCacheHeaders(w, cacheNoStore, 0, "")
 	if r.URL.Query().Get("envelope") == "true" {
 		if items == nil {
@@ -1669,6 +1682,10 @@ func (s *Server) handleListWatchedChains(w http.ResponseWriter, r *http.Request)
 		return
 
 	}
+
+	// The whole watch list is returned on one page, so the total is just
+	// the page size; no separate count query is needed.
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", len(contracts)))
 
 	writeJSON(w, http.StatusOK, watchedListResponse{Contracts: contracts, Count: len(contracts)})
 

@@ -331,10 +331,16 @@ func (m *fakeExportStore) DeadLetterEvent(context.Context, store.DeadLetterInput
 func (m *fakeExportStore) ListDeadLetters(context.Context, string, int, string) ([]store.DeadLetter, string, error) {
 	return nil, "", nil
 }
+func (m *fakeExportStore) CountDeadLetters(context.Context, string) (int64, error) {
+	return 0, nil
+}
 func (m *fakeExportStore) GetDeadLetter(context.Context, int64) (store.DeadLetter, error) {
 	return store.DeadLetter{}, store.ErrNotFound
 }
 func (m *fakeExportStore) DeleteDeadLetter(context.Context, int64) error { return nil }
+func (m *fakeExportStore) CountDeliveryAttempts(context.Context, int64, store.SubscriptionOwner) (int64, error) {
+	return 0, nil
+}
 
 // DeleteEventsBefore satisfies store.Store; this mock never prunes.
 func (f *fakeExportStore) DeleteEventsBefore(context.Context, int64, time.Time, int) (int64, error) {

@@ -96,6 +96,17 @@ type stubStore struct {
 	deadLettersResult []store.DeadLetter
 	deadLettersCursor string
 	deadLettersErr    error
+	// deadLettersCount is what CountDeadLetters returns; the error field
+	// drives the "count failed, header omitted" path.
+	deadLettersCount    int64
+	deadLettersCountErr error
+
+	// deliveryAttemptsCount is what CountDeliveryAttempts returns; the
+	// error field drives the "count failed, header omitted" path.
+	deliveryAttemptsCount    int64
+	deliveryAttemptsCountErr error
+
+	subscriptions []store.Subscription
 
 	contractCursors map[string]store.ContractCursor
 }
@@ -264,7 +275,7 @@ func (s *stubStore) GetSubscription(_ context.Context, id int64, _ store.Subscri
 	return store.Subscription{}, store.ErrNotFound
 }
 func (s *stubStore) ListSubscriptions(context.Context, store.SubscriptionOwner) ([]store.Subscription, error) {
-	return nil, nil
+	return s.subscriptions, nil
 }
 func (s *stubStore) UpdateSubscription(_ context.Context, sub store.Subscription, _ store.SubscriptionOwner) (store.Subscription, error) {
 	return sub, nil
@@ -1708,6 +1719,95 @@ func TestEnvelope(t *testing.T) {
 	})
 }
 
+// TestListEndpoints_TotalCountHeader covers the X-Total-Count contract on
+// every list endpoint that reports it: the header carries the unpaginated
+// total, and a failed count (or a page whose length is the total) never
+// fails the request.
+func TestListEndpoints_TotalCountHeader(t *testing.T) {
+	t.Run("dead-letters sets X-Total-Count when the count succeeds", func(t *testing.T) {
+		st := &stubStore{
+			deadLettersResult: []store.DeadLetter{{ID: 1}},
+			deadLettersCursor: "dl-cursor",
+			deadLettersCount:  7,
+		}
+		resp, _ := doGetWithAuth(t, newTestServer(st, nil), "/dead-letters?contract_id="+testContract, "test-key")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "7", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("dead-letters omits X-Total-Count when the count fails", func(t *testing.T) {
+		st := &stubStore{
+			deadLettersResult:   []store.DeadLetter{{ID: 1}},
+			deadLettersCountErr: errors.New("count timeout"),
+		}
+		resp, _ := doGetWithAuth(t, newTestServer(st, nil), "/dead-letters", "test-key")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("subscriptions reports the owner-scoped total", func(t *testing.T) {
+		st := &stubStore{subscriptions: []store.Subscription{{ID: 1}, {ID: 2}}}
+		resp, _ := doGet(t, newTestServer(st, nil), "/subscriptions")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "2", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("subscriptions reports zero for an empty list", func(t *testing.T) {
+		resp, _ := doGet(t, newTestServer(&stubStore{}, nil), "/subscriptions")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "0", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("deliveries sets X-Total-Count when the count succeeds", func(t *testing.T) {
+		st := newSubErrorStub()
+		st.deliveryAttemptsCount = 12
+		resp, _ := doAPIRequest(t, newServerFromStub(st), http.MethodGet, "/subscriptions/1/deliveries", "")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "12", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("deliveries omits X-Total-Count when the count fails", func(t *testing.T) {
+		st := newSubErrorStub()
+		st.deliveryAttemptsCountErr = errors.New("count timeout")
+		resp, _ := doAPIRequest(t, newServerFromStub(st), http.MethodGet, "/subscriptions/1/deliveries", "")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("watched-contracts reports the list length", func(t *testing.T) {
+		st := &stubStore{watchedList: []store.WatchedContract{
+			{ContractID: testContract},
+			{ContractID: "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"},
+		}}
+		resp, _ := doGetWithAuth(t, newTestServer(st, nil), "/watched-contracts", "test-key")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "2", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("contracts reports zero for an empty result set", func(t *testing.T) {
+		// An absent header would be ambiguous ("not counted" vs "zero"),
+		// so an empty page must still carry X-Total-Count: 0.
+		st := &stubStore{countContractsResult: 0}
+		resp, _ := doGet(t, newTestServer(st, nil), "/contracts")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "0", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("contracts omits X-Total-Count when the count fails", func(t *testing.T) {
+		st := &stubStore{countContractsErr: errors.New("count timeout")}
+		resp, _ := doGet(t, newTestServer(st, nil), "/contracts")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("address events sets X-Total-Count from the store count", func(t *testing.T) {
+		st := &stubStore{addressEvents: []store.Event{{ID: "e1"}}, addressCount: 3}
+		resp, _ := doGet(t, newTestServer(st, nil), "/addresses/"+testAddress+"/events")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "3", resp.Header.Get("X-Total-Count"))
+	})
+}
+
 func TestVersion(t *testing.T) {
 	t.Run("returns default values", func(t *testing.T) {
 		resp, body := doGet(t, newTestServer(&stubStore{}, nil), "/version")
@@ -2539,3 +2639,9 @@ func (m *stubStore) GetDeadLetter(context.Context, int64) (store.DeadLetter, err
 	return store.DeadLetter{}, store.ErrNotFound
 }
 func (m *stubStore) DeleteDeadLetter(context.Context, int64) error { return nil }
+func (m *stubStore) CountDeadLetters(context.Context, string) (int64, error) {
+	return m.deadLettersCount, m.deadLettersCountErr
+}
+func (m *stubStore) CountDeliveryAttempts(context.Context, int64, store.SubscriptionOwner) (int64, error) {
+	return m.deliveryAttemptsCount, m.deliveryAttemptsCountErr
+}
