@@ -54,6 +54,7 @@ func requireSchema(t *testing.T, pool *pgxpool.Pool) {
 			indexes: []string{
 				"idx_events_contract_id",
 				"idx_events_ledger",
+				"idx_events_tx_hash",
 			},
 		},
 		{

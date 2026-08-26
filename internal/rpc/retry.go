@@ -2,7 +2,9 @@ package rpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"time"
 )
@@ -18,10 +20,23 @@ type RetryConfig struct {
 	// MaxBackoff caps the backoff duration. Each retry doubles BaseBackoff
 	// but never exceeds MaxBackoff.
 	MaxBackoff time.Duration
-	// Jitter, when true, randomises each backoff to [0.5×backoff, 1.5×backoff)
-	// so concurrent retries don't thundering-herd the endpoint.
+	// Jitter, when true, randomises each computed backoff to
+	// [0.5×backoff, 1.5×backoff) so concurrent retries don't
+	// thundering-herd the endpoint. Never applied to a provider-supplied
+	// Retry-After wait, which is honored as-is (capped).
 	Jitter bool
+	// Logger, when non-nil, receives debug lines describing each scheduled
+	// retry and where its wait came from ("retry_after" vs "backoff").
+	// Nil falls back to slog.Default(); Debug level means silent in
+	// default deployments.
+	Logger *slog.Logger
 }
+
+// maxRetryAfterWait caps how long a single Retry-After hint may make one
+// retry wait. Providers occasionally send absurd values (an hour, or a date
+// typo years out); hanging a call that long would stall ingestion far worse
+// than a few extra 429s would.
+const maxRetryAfterWait = 60 * time.Second
 
 // RetryClient wraps any Client and retries calls on transient errors with
 // exponential backoff. Non-retryable errors (context cancellation, invalid
@@ -69,14 +84,13 @@ func (c *RetryClient) doWithRetry(ctx context.Context, fn func(context.Context) 
 			return err
 		}
 		if attempt < c.config.MaxAttempts {
-			// Exponential backoff with optional jitter.
-			d := backoff
-			if c.config.Jitter {
-				// jitter in [0.5×d, 1.5×d)
-				half := d / 2
-				d = half + rand.N(d)
-			}
-			if !sleepCtx(ctx, d) {
+			wait, source := c.retryWait(err, backoff)
+			c.log().Debug("rpc retry scheduled",
+				"attempt", attempt,
+				"wait", wait.String(),
+				"source", source,
+				"error", err.Error())
+			if !sleepCtx(ctx, wait) {
 				return ctx.Err()
 			}
 			backoff *= 2
@@ -86,6 +100,36 @@ func (c *RetryClient) doWithRetry(ctx context.Context, fn func(context.Context) 
 		}
 	}
 	return fmt.Errorf("exhausted %d retries: %w", c.config.MaxAttempts, lastErr)
+}
+
+// retryWait decides how long to wait before the next attempt. When the
+// provider sent a Retry-After hint (HTTP 429), that hint wins outright —
+// it is capped at maxRetryAfterWait but never jittered or shrunk, because
+// retrying earlier than told only earns another 429. Any other failure
+// uses the running exponential backoff with optional jitter.
+func (c *RetryClient) retryWait(err error, backoff time.Duration) (time.Duration, string) {
+	var rle *RateLimitedError
+	if errors.As(err, &rle) && rle.RetryAfter > 0 {
+		d := rle.RetryAfter
+		if d > maxRetryAfterWait {
+			d = maxRetryAfterWait
+		}
+		return d, "retry_after"
+	}
+	d := backoff
+	if c.config.Jitter {
+		// jitter in [0.5×d, 1.5×d)
+		half := d / 2
+		d = half + rand.N(d)
+	}
+	return d, "backoff"
+}
+
+func (c *RetryClient) log() *slog.Logger {
+	if c.config.Logger != nil {
+		return c.config.Logger
+	}
+	return slog.Default()
 }
 
 // isRetryable reports whether err is worth retrying. Context cancellation,
@@ -98,6 +142,12 @@ func isRetryable(err error) bool {
 	// Context cancellation is never retryable.
 	if isContextErr(err) {
 		return false
+	}
+	// HTTP 429 is the provider telling us to slow down — always worth
+	// retrying, ideally after its Retry-After hint (see retryWait).
+	var rateLimited *RateLimitedError
+	if errors.As(err, &rateLimited) {
+		return true
 	}
 	// JSON-RPC error objects: codes ≥ -32000 are server errors.
 	var rpcErr *Error
