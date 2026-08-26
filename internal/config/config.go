@@ -134,6 +134,12 @@ type Config struct {
 	// safety net. Default 500 (up from the previous hardcoded 200).
 	APIMaxLimit int `env:"API_MAX_LIMIT" envDefault:"500"`
 
+	// StatsCacheTTL is how long GET /stats results are served from the
+	// per-scope cache before being recomputed, short-circuiting the
+	// expensive aggregation on busy endpoints. Zero disables caching.
+	// Default 5s keeps a dial board roughly in pace with ingestion.
+	StatsCacheTTL time.Duration `env:"STATS_CACHE_TTL" envDefault:"5s"`
+
 	// CachePrivate flips the cacheable endpoints from Cache-Control: public
 	// to Cache-Control: private. Set this when the deployment serves
 	// per-user data behind an auth layer (#17, not yet merged) so shared
