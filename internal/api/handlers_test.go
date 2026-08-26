@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,6 +73,65 @@ func TestIsValidAddress(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := isValidAddress(tt.input)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPaginationLink(t *testing.T) {
+	tests := []struct {
+		name            string
+		url             string
+		cursor          string
+		wantContains    []string
+		wantNotContains []string
+	}{
+		{
+			name:         "non-empty cursor is set in the returned URL",
+			url:          "https://example.com/events?contract_id=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+			cursor:       "abc123",
+			wantContains: []string{"cursor=abc123"},
+		},
+		{
+			name:            "empty cursor removes the cursor parameter entirely",
+			url:             "https://example.com/events?cursor=old&contract_id=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+			cursor:          "",
+			wantContains:    []string{"contract_id="},
+			wantNotContains: []string{"cursor"},
+		},
+		{
+			name:         "unrelated filters survive unchanged",
+			url:          "https://example.com/events?contract_id=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC&limit=50",
+			cursor:       "nextpage",
+			wantContains: []string{"cursor=nextpage", "contract_id=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC", "limit=50"},
+		},
+		{
+			name:            "existing cursor parameter is replaced rather than duplicated",
+			url:             "https://example.com/events?cursor=old_value",
+			cursor:          "new_value",
+			wantContains:    []string{"cursor=new_value"},
+			wantNotContains: []string{"cursor=old_value"},
+		},
+		{
+			name:         "path is preserved for a nested route",
+			url:          "https://example.com/contracts/CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC/events?from_ledger=100",
+			cursor:       "page2",
+			wantContains: []string{"/contracts/CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC/events", "cursor=page2", "from_ledger=100"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := http.NewRequest(http.MethodGet, tt.url, nil)
+			assert.NoError(t, err)
+
+			got := paginationLink(r, tt.cursor)
+
+			for _, s := range tt.wantContains {
+				assert.Contains(t, got, s)
+			}
+			for _, s := range tt.wantNotContains {
+				assert.NotContains(t, got, s)
+			}
 		})
 	}
 }
