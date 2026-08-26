@@ -34,6 +34,7 @@ var envKeys = []string{
 	"METRICS_ENABLED", "ENABLE_METRICS", "CACHE_PRIVATE", "COMPRESS_MIN_SIZE",
 	"EXPORT_MAX_RANGE", "REORG_CONFIRMATION_WINDOW", "REORG_RESCAN_INTERVAL",
 	"SWEEP_CONCURRENCY", "API_MAX_LIMIT",
+	"STATS_CACHE_TTL",
 	"CORS_ALLOWED_ORIGINS", "CORS_ALLOWED_METHODS", "CORS_ALLOWED_HEADERS",
 	"CORS_EXPOSED_HEADERS", "GRAPHQL_PLAYGROUND",
 }
@@ -56,6 +57,8 @@ func TestLoad(t *testing.T) {
 				assert.Empty(t, c.WatchedContracts)
 				assert.Equal(t, uint32(100), c.LagWarnLedgers,
 					"LagWarnLedgers default lets the lag alarm work out of the box")
+				assert.Equal(t, 5*time.Second, c.StatsCacheTTL,
+					"StatsCacheTTL defaults to 5s")
 			},
 		},
 		{
@@ -746,6 +749,16 @@ func TestLoad(t *testing.T) {
 				"API_MAX_LIMIT": "-1",
 			},
 			wantErr: "API_MAX_LIMIT",
+		},
+		{
+			name: "STATS_CACHE_TTL configurable",
+			env: map[string]string{
+				"DATABASE_URL":    "postgres://localhost/db",
+				"STATS_CACHE_TTL": "30s",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, 30*time.Second, c.StatsCacheTTL)
+			},
 		},
 		{
 			name: "SWEEP_CONCURRENCY zero rejected",
