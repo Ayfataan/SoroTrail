@@ -111,6 +111,15 @@
         "responses": {
           "200": {
             "description": "A page of events",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of events matching the request's filters, ignoring pagination. Omitted when the count could not be computed; the page itself is still returned.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -306,6 +315,15 @@
         "responses": {
           "200": {
             "description": "A page of events for the contract",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of events matching the request's filters, ignoring pagination. Omitted when the count could not be computed; the page itself is still returned.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -373,6 +391,15 @@
         "responses": {
           "200": {
             "description": "A page of events involving the address",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of events matching the request's filters, ignoring pagination. Omitted when the count could not be computed; the page itself is still returned.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -456,6 +483,15 @@
         "responses": {
           "200": {
             "description": "Success",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of tenants, which is the full list since this endpoint is not paginated.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -749,6 +785,15 @@
         "responses": {
           "200": {
             "description": "Success",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of granted contracts, which is the full list since this endpoint is not paginated.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -905,6 +950,15 @@
         "responses": {
           "200": {
             "description": "Success",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of API keys, which is the full list since this endpoint is not paginated.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1075,6 +1129,15 @@
         "responses": {
           "200": {
             "description": "A page of indexed contracts",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of contracts matching the request's filters, ignoring pagination. Omitted when the count could not be computed; the page itself is still returned.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1693,7 +1756,16 @@
         ],
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "Success",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of contracts the tenant watches, which is the full list since this endpoint is not paginated.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1800,7 +1872,16 @@
         ],
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "Success",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of watched contracts, which is the full list since this endpoint is not paginated.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1914,7 +1995,16 @@
         ],
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "Success",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of dead-letter rows matching the request's contract filter, ignoring pagination. Omitted when the count could not be computed; the page itself is still returned.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
@@ -2132,6 +2222,15 @@
         "responses": {
           "200": {
             "description": "All registered subscriptions",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of subscriptions visible to the caller, which is the full list since this endpoint is not paginated.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2332,6 +2431,15 @@
         "responses": {
           "200": {
             "description": "Delivery attempts, newest first",
+            "headers": {
+              "X-Total-Count": {
+                "description": "The total number of delivery attempts recorded for the subscription, ignoring the limit. Omitted when the count could not be computed; the page itself is still returned.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {

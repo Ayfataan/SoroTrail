@@ -760,6 +760,26 @@ func (s *SQLite) ListDeadLetters(ctx context.Context, contractID string, limit i
 	return letters, next, nil
 }
 
+// CountDeadLetters returns the total number of dead-letter rows matching
+// the same contract filter as ListDeadLetters ("" means all contracts).
+// Pagination is ignored: the count is the full match set behind any page.
+func (s *SQLite) CountDeadLetters(ctx context.Context, contractID string) (int64, error) {
+	var total int64
+	var err error
+	if contractID != "" {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT count(*) FROM dead_letters WHERE contract_id = ?`,
+			contractID,
+		).Scan(&total)
+	} else {
+		err = s.db.QueryRowContext(ctx, `SELECT count(*) FROM dead_letters`).Scan(&total)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("counting dead letters: %w", err)
+	}
+	return total, nil
+}
+
 func (s *SQLite) GetDeadLetter(ctx context.Context, id int64) (DeadLetter, error) {
 	var d DeadLetter
 	var txHash, valueXDR *string
@@ -1268,6 +1288,22 @@ func (s *SQLite) ListDeliveryAttempts(ctx context.Context, subscriptionID int64,
 		return nil, fmt.Errorf("reading delivery attempts: %w", err)
 	}
 	return attempts, nil
+}
+
+// CountDeliveryAttempts returns the total number of delivery attempts
+// recorded for a subscription, ignoring the list's limit. SQLite applies
+// no owner filter (mirroring ListDeliveryAttempts) — the multi-tenant
+// owner boundary lives in Postgres.
+func (s *SQLite) CountDeliveryAttempts(ctx context.Context, subscriptionID int64, _ SubscriptionOwner) (int64, error) {
+	var total int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM delivery_attempts WHERE subscription_id = ?`,
+		subscriptionID,
+	).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("counting delivery attempts: %w", err)
+	}
+	return total, nil
 }
 
 func (s *SQLite) GetContractSpec(ctx context.Context, wasmHash string) ([]byte, error) {

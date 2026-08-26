@@ -15,6 +15,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -1155,4 +1156,69 @@ func TestQueryEvents_PositionalTopics(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
 	assert.Equal(t, e1.ID, got[0].ID)
+}
+
+// TestCountDeadLetters verifies that CountDeadLetters mirrors the
+// ListDeadLetters contract filter: the total is the full match set, with
+// and without the per-contract filter, and is what the X-Total-Count
+// header is built from.
+func TestCountDeadLetters(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	seed := []DeadLetterInput{
+		{EventID: "ev-a1", ContractID: contractA, Ledger: 1, Type: "contract", TxHash: "hash-1", Err: errors.New("decode")},
+		{EventID: "ev-a2", ContractID: contractA, Ledger: 2, Type: "contract", TxHash: "hash-2", Err: errors.New("decode")},
+		{EventID: "ev-b1", ContractID: contractB, Ledger: 1, Type: "contract", TxHash: "hash-3", Err: errors.New("decode")},
+	}
+	for _, in := range seed {
+		_, err := st.DeadLetterEvent(ctx, in)
+		require.NoError(t, err)
+	}
+
+	total, err := st.CountDeadLetters(ctx, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+
+	scoped, err := st.CountDeadLetters(ctx, contractA)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), scoped)
+
+	none, err := st.CountDeadLetters(ctx, contractC)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), none)
+}
+
+// TestCountDeliveryAttempts verifies that CountDeliveryAttempts totals a
+// subscription's attempts regardless of the list limit, and that it is
+// owner-gated the same way the list is: an owner that cannot see the
+// subscription gets ErrNotFound rather than a count.
+func TestCountDeliveryAttempts(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	sub, err := st.CreateSubscription(ctx, Subscription{
+		URL:     "https://example.com/hook",
+		Filters: SubscriptionFilter{ContractID: contractA},
+		Secret:  "s",
+		Enabled: true,
+	})
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		_, err := st.RecordDeliveryAttempt(ctx, DeliveryAttempt{
+			SubscriptionID: sub.ID,
+			EventID:        "ev-1",
+			Status:         DeliveryFailed,
+			Error:          "timeout",
+		})
+		require.NoError(t, err)
+	}
+
+	total, err := st.CountDeliveryAttempts(ctx, sub.ID, AllSubscriptions())
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+
+	_, err = st.CountDeliveryAttempts(ctx, sub.ID, OwnedBy(999))
+	require.ErrorIs(t, err, ErrNotFound,
+		"an owner that cannot see the subscription must not be able to count its attempts")
 }
