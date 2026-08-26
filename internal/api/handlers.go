@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 
 	"strconv"
 
@@ -169,6 +170,14 @@ type envelopeResponse struct {
 // next-page cursor. It is a convenience constructor so call sites stay
 // single-line.
 func wrapEnvelope(data any, cursor string) envelopeResponse {
+	// data is documented as "array, never null". A handler with no rows to
+	// return usually holds a nil slice, which marshals to null and forces
+	// every client to handle both shapes; normalise it to an empty array of
+	// the same element type here, at the one place every caller passes
+	// through.
+	if rv := reflect.ValueOf(data); rv.Kind() == reflect.Slice && rv.IsNil() {
+		data = reflect.MakeSlice(rv.Type(), 0, 0).Interface()
+	}
 	return envelopeResponse{Data: data, NextCursor: cursor}
 }
 
@@ -447,7 +456,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		// Only check lag if we have an ingestion state and an RPC client.
 		if s.rpc != nil {
 			if health, err := s.rpc.GetHealth(ctx); err == nil {
-				lag := int64(health.LatestLedger) - state.LastIngestedLedger
+				lag := ingestLagLedgers(int64(health.LatestLedger), state.LastIngestedLedger)
 				if lag > 100 && state.LastIngestedLedger > 0 {
 					resp.Status = "degraded"
 					resp.Checks["ingestion_lag"] = fmt.Sprintf(
@@ -908,6 +917,8 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request, filter stor
 	if events == nil {
 		events = []store.Event{}
 	}
+
+	setPaginationHeaders(w, r, cursor)
 
 	// Tag every event with its SEP-41 normalized envelope (if any) before
 	// rendering — the layer is additive and never destructive, so events
@@ -1386,12 +1397,19 @@ type contractListResponse struct {
 	Cursor    string                  `json:"cursor,omitempty"`
 }
 
+// maxContractsListLimit caps ?limit= on GET /contracts. The listing is a
+// grouped scan over the events table (one row per contract), so its page
+// size is bounded tighter than the event endpoints — 1–200 with a default
+// of 50, matching the shared OpenAPI Limit parameter.
+const maxContractsListLimit = 200
+
 // handleListContracts returns one ContractSummary per indexed contract,
-// paginated, default-sorted by event_count desc (the most active
-// contracts first). The endpoint is intentionally READ-ONLY and
-// unauthenticated: a contract listing has no surface area for
-// cross-tenant data leakage (a contract_id is opaque), and gating it
-// behind API_KEY would force every browser dashboard to log in.
+// paginated, default-ordered by contract_id ascending (a stable
+// alphabetical walk; ?sort=count ranks by activity instead). The endpoint
+// is intentionally READ-ONLY and unauthenticated: a contract listing has
+// no surface area for cross-tenant data leakage (a contract_id is
+// opaque), and gating it behind API_KEY would force every browser
+// dashboard to log in.
 //
 // Cache-Control is no-cache: a brand-new contract can be ingested at
 // any time, and a stale cache would hide it from a freshly-launched
@@ -1405,10 +1423,11 @@ func (s *Server) handleListContracts(w http.ResponseWriter, r *http.Request) {
 	}
 	if !store.ValidContractsSortKey(f.SortKey) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf(
-			"invalid sort %q (want %s, %s, %s, or %s)",
+			"invalid sort %q (want %s, %s, %s, %s, or %s)",
 			f.SortKey,
-			store.SortByActivity, store.SortByFirstLedger,
-			store.SortByLastLedger, store.SortByLastSeen))
+			store.SortByContractID, store.SortByActivity,
+			store.SortByFirstLedger, store.SortByLastLedger,
+			store.SortByLastSeen))
 		return
 	}
 	if f.Order != "" && f.Order != "asc" && f.Order != "desc" {
@@ -1421,8 +1440,8 @@ func (s *Server) handleListContracts(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > store.MaxQueryLimit {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("limit must be an integer in [1,%d]", store.MaxQueryLimit))
+		if err != nil || n < 1 || n > maxContractsListLimit {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("limit must be an integer in [1,%d]", maxContractsListLimit))
 			return
 		}
 		f.Limit = n
@@ -1431,6 +1450,12 @@ func (s *Server) handleListContracts(w http.ResponseWriter, r *http.Request) {
 	}
 	items, cursor, err := s.store.ListContracts(r.Context(), f)
 	if err != nil {
+		// A cursor that passes the charset check but not the decode is
+		// bad client input (400), not a server fault (500).
+		if errors.Is(err, store.ErrInvalidContractsCursor) {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid cursor %q", f.Cursor))
+			return
+		}
 		loggerFromContext(r.Context()).Error("listing contracts", "error", err)
 		writeError(w, http.StatusInternalServerError, errors.New("listing contracts failed"))
 		return
@@ -1478,8 +1503,8 @@ func (s *Server) handleListDeadLetters(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > store.MaxQueryLimit {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("limit must be an integer in [1,%d]", store.MaxQueryLimit))
+		if err != nil || n < 1 || n > maxLimit {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("limit must be an integer in [1,%d]", maxLimit))
 			return
 		}
 		f.Limit = n
@@ -2167,6 +2192,53 @@ func ifNoneMatch(r *http.Request, etag string) bool {
 
 	return false
 
+}
+
+// setPaginationHeaders emits RFC 5988 Link headers for the event list
+// endpoints: rel="next" whenever the store returned a continuation cursor,
+// and rel="prev" whenever the caller supplied one. It must run before the
+// body is written, since writeJSON commits the status line.
+func setPaginationHeaders(w http.ResponseWriter, r *http.Request, nextCursor string) {
+	var links []string
+	if nextCursor != "" {
+		links = append(links, fmt.Sprintf(`<%s>; rel="next"`, paginationLink(r, nextCursor)))
+	}
+	if _, ok := r.URL.Query()["cursor"]; ok {
+		links = append(links, fmt.Sprintf(`<%s>; rel="prev"`, paginationLink(r, "")))
+	}
+	if len(links) > 0 {
+		w.Header().Set("Link", strings.Join(links, ", "))
+	}
+}
+
+// paginationLink rebuilds the current request URL with cursor set to the
+// given value (or removed, for the prev link), preserving every other query
+// parameter so a client can follow the link without re-deriving its filters.
+func paginationLink(r *http.Request, cursor string) string {
+	q := r.URL.Query()
+	if cursor == "" {
+		q.Del("cursor")
+	} else {
+		q.Set("cursor", cursor)
+	}
+
+	scheme := "http"
+	if r.URL.Scheme != "" {
+		scheme = r.URL.Scheme
+	} else if r.TLS != nil {
+		scheme = "https"
+	}
+
+	host := r.Host
+	if host == "" {
+		host = r.URL.Host
+	}
+
+	u := &url.URL{Scheme: scheme, Host: host, Path: r.URL.Path, RawQuery: q.Encode()}
+	if r.URL.RawPath != "" {
+		u.RawPath = r.URL.RawPath
+	}
+	return u.String()
 }
 
 func writeCacheHeaders(w http.ResponseWriter, kind cacheability, maxAge time.Duration, etag string) {
