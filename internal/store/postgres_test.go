@@ -263,18 +263,21 @@ func TestTxHashIndex(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 
-	var indexDef string
+	// events is partitioned, so indexdef renders the target as
+	// "ON ONLY public.events"; assert the table via the catalog's
+	// tablename column instead of a substring of the definition.
+	var tableName, indexDef string
 	err := st.pool.QueryRow(ctx,
-		`SELECT indexdef FROM pg_indexes WHERE indexname = $1`,
+		`SELECT tablename, indexdef FROM pg_indexes WHERE indexname = $1`,
 		"idx_events_tx_hash",
-	).Scan(&indexDef)
+	).Scan(&tableName, &indexDef)
 	require.NoError(t, err, "tx_hash index should exist after migrations")
+	assert.Equal(t, "events", tableName, "index should be on the events table")
 
 	defWantSubstrings := []struct {
 		name string
 		want string
 	}{
-		{"indexed on events", " ON events"},
 		{"covers tx_hash", "(tx_hash)"},
 	}
 	for _, tc := range defWantSubstrings {
