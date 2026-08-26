@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,8 +43,17 @@ type Config struct {
 	PollInterval          time.Duration `env:"POLL_INTERVAL" envDefault:"5s"`
 	HTTPAddr              string        `env:"HTTP_ADDR" envDefault:":8080"`
 	WatchedContracts      []string      `env:"WATCHED_CONTRACTS"`
-	StartLedger           uint32        `env:"START_LEDGER"`
-	RetentionLedgers      uint32        `env:"RETENTION_LEDGERS" envDefault:"17280"`
+	// StartLedger is the absolute cold-start ledger. When zero, the
+	// ingester falls back to StartLedgerRaw (relative offset) or the
+	// default retention-window calculation.
+	StartLedger uint32 `env:"START_LEDGER"`
+	// StartLedgerRaw holds the raw START_LEDGER value from the
+	// environment so the ingester can parse relative offsets (e.g.
+	// "latest-1000") at runtime when the RPC client is available.
+	// For absolute numeric values this is also populated so the
+	// ingester can validate against the RPC retention window.
+	StartLedgerRaw string `env:"START_LEDGER_RAW"`
+	RetentionLedgers uint32 `env:"RETENTION_LEDGERS" envDefault:"17280"`
 	PartitionLedgerSpan   uint32        `env:"PARTITION_LEDGER_SPAN" envDefault:"120960"`
 	LogLevel              string        `env:"LOG_LEVEL" envDefault:"info"`
 	LogFormat             string        `env:"LOG_FORMAT" envDefault:"text"`
@@ -254,6 +264,11 @@ func Load() (Config, error) {
 	cfg.WatchedContracts = cleanContractList(cfg.WatchedContracts)
 	cfg.RPCURLS = cleanContractList(cfg.RPCURLS)
 	cfg.CORSAllowedOrigins = cleanOrigins(cfg.CORSAllowedOrigins)
+	if cfg.StartLedgerRaw != "" {
+		if n, err := ParseStartLedger(cfg.StartLedgerRaw); err == nil {
+			cfg.StartLedger = n
+		}
+	}
 	if err := cfg.ValidateAll(); err != nil {
 		return Config{}, err
 	}
@@ -505,6 +520,40 @@ func ValidCursor(s string) bool {
 	return true
 }
 
+// ParseStartLedger parses a START_LEDGER value that may be an absolute
+// ledger number or a relative offset like "latest-1000". Absolute values
+// must be positive. Relative offsets subtract from latestLedger and must
+// resolve to at least ledger 2.
+func ParseStartLedger(raw string, latestLedger ...uint32) (uint32, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	if n, err := strconv.ParseUint(raw, 10, 32); err == nil {
+		if n < 2 {
+			return 0, fmt.Errorf("START_LEDGER %q: ledger must be >= 2", raw)
+		}
+		return uint32(n), nil
+	}
+	if !strings.HasPrefix(strings.ToLower(raw), "latest-") {
+		return 0, fmt.Errorf("START_LEDGER %q: not an absolute ledger number or relative offset (expected N or latest-N)", raw)
+	}
+	offsetStr := raw[len("latest-"):]
+	offset, err := strconv.ParseUint(offsetStr, 10, 32)
+	if err != nil || offset == 0 {
+		return 0, fmt.Errorf("START_LEDGER %q: offset must be a positive integer", raw)
+	}
+	if len(latestLedger) == 0 || latestLedger[0] == 0 {
+		return 0, fmt.Errorf("START_LEDGER %q: relative offset requires RPC latest ledger (not available at config parse time)", raw)
+	}
+	latest := int64(latestLedger[0])
+	start := latest - int64(offset)
+	if start < 2 {
+		start = 2
+	}
+	return uint32(start), nil
+}
+
 // ValidOrigin reports whether s is a valid CORS origin: either the "*"
 // wildcard (allow any origin) or an absolute http/https URL whose host is
 // present and which carries no path, query, or fragment (browsers never
@@ -594,6 +643,7 @@ func (c Config) LoggableFields() []any {
 		"http_addr", c.HTTPAddr,
 		"watched_contracts", len(c.WatchedContracts),
 		"start_ledger", c.StartLedger,
+		"start_ledger_raw", c.StartLedgerRaw,
 		"retention_ledgers", c.RetentionLedgers,
 		"log_level", c.LogLevel,
 		"http_read_timeout", c.HTTPReadTimeout,

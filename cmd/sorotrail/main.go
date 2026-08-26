@@ -248,6 +248,7 @@ func run() error {
 	ing := ingester.New(countingClient, st, decode.XDRDecoder{}, log, ingester.Options{
 		PollInterval:            cfg.PollInterval,
 		StartLedger:             cfg.StartLedger,
+		StartLedgerRaw:          cfg.StartLedgerRaw,
 		RetentionLedgers:        cfg.RetentionLedgers,
 		LagWarnLedgers:          cfg.LagWarnLedgers,
 		SweepConcurrency:        cfg.SweepConcurrency,

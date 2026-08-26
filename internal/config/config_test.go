@@ -1235,3 +1235,48 @@ func TestLoad_MultiTenancy(t *testing.T) {
 		})
 	}
 }
+
+func TestParseStartLedger(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		latest  uint32
+		want    uint32
+		wantErr string
+	}{
+		{name: "absolute", raw: "12345", want: 12345},
+		{name: "absolute min ledger 2", raw: "2", want: 2},
+		{name: "absolute below min ledger rejected", raw: "1", wantErr: "must be >= 2"},
+		{name: "relative offset", raw: "latest-1000", latest: 50000, want: 49000},
+		{name: "relative offset clamps to 2", raw: "latest-100000", latest: 50000, want: 2},
+		{name: "relative offset no latest", raw: "latest-1000", wantErr: "not available"},
+		{name: "relative offset zero", raw: "latest-0", wantErr: "offset must be a positive"},
+		{name: "empty", raw: "", want: 0},
+		{name: "invalid", raw: "abc", wantErr: "not an absolute"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got uint32
+			var err error
+			if tt.latest > 0 {
+				got, err = ParseStartLedger(tt.raw, tt.latest)
+			} else {
+				got, err = ParseStartLedger(tt.raw)
+			}
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestLoadStartLedgerRaw(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("START_LEDGER_RAW", "latest-500")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "latest-500", cfg.StartLedgerRaw)
+}
