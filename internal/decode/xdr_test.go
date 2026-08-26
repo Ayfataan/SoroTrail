@@ -27,6 +27,32 @@ func scU64(n uint64) xdr.ScVal {
 	return xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &u}
 }
 
+// testWasmHash is a fixed 32-byte wasm hash reused by struct ScVal tests.
+var testWasmHash = xdr.Hash{
+	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+	0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+	0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+	0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+}
+
+func wasmExecutable() xdr.ContractExecutable {
+	h := testWasmHash
+	return xdr.ContractExecutable{
+		Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+		WasmHash: &h,
+	}
+}
+
+func scContractInstance(executable xdr.ContractExecutable, storage *xdr.ScMap) xdr.ScVal {
+	return xdr.ScVal{
+		Type: xdr.ScValTypeScvContractInstance,
+		Instance: &xdr.ScContractInstance{
+			Executable: executable,
+			Storage:    storage,
+		},
+	}
+}
+
 func TestXDRDecoder_DecodeScVal(t *testing.T) {
 	boolVal := true
 	u32 := xdr.Uint32(7)
@@ -132,6 +158,61 @@ func TestXDRDecoder_ContractAddress(t *testing.T) {
 	assert.True(t, strings.HasPrefix(addr, "C"), "contract addresses use the C... strkey prefix, got %q", addr)
 }
 
+func TestXDRDecoder_StructScVals(t *testing.T) {
+	// Literal base64 XDR samples pin the wire format for the struct-carrying
+	// ScVal variants (SCV_CONTRACT_INSTANCE, SCV_LEDGER_KEY_NONCE,
+	// SCV_EXECUTABLE_TAG). Each sample is a real base64-encoded ScVal.
+	tests := []struct {
+		name string
+		b64  string
+		want string
+	}{
+		{
+			"contract instance: wasm executable + storage",
+			"AAAAEwAAAAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fIAAAAAEAAAABAAAADwAAAAdiYWxhbmNlAAAAAAUAAAAAAAAD6A==",
+			`{"contract_instance":{"executable":{"wasm_hash":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"},"storage":[{"key":{"symbol":"balance"},"val":{"u64":1000}}]}}`,
+		},
+		{
+			"contract instance: wasm executable, no storage",
+			"AAAAEwAAAAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fIAAAAAA=",
+			`{"contract_instance":{"executable":{"wasm_hash":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"},"storage":[]}}`,
+		},
+		{
+			"contract instance: stellar asset executable",
+			"AAAAEwAAAAEAAAAA",
+			`{"contract_instance":{"executable":{"stellar_asset":null},"storage":[]}}`,
+		},
+		{
+			"contract instance: external ref executable",
+			"AAAAEwAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAnYxAAAAAAAA",
+			`{"contract_instance":{"executable":{"external_ref":{"executable_owner":"GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF","tag":"v1"}},"storage":[]}}`,
+		},
+		{
+			"ledger key nonce",
+			"AAAAFQAAAAAAAAAq",
+			`{"ledger_key_nonce":{"nonce":42}}`,
+		},
+		{
+			"ledger key nonce: negative",
+			"AAAAFf/////////5",
+			`{"ledger_key_nonce":{"nonce":-7}}`,
+		},
+		{
+			"executable tag",
+			"AAAAFgAAAAtzb3JvYmFuLXRhZwA=",
+			`{"executable_tag":"soroban-tag"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := XDRDecoder{}.DecodeScVal(tt.b64)
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.want, string(got))
+		})
+	}
+}
+
 func TestXDRDecoder_UnknownTypeFallback(t *testing.T) {
 	val := xdr.ScVal{Type: xdr.ScValTypeScvLedgerKeyContractInstance}
 	raw := mustBase64(t, val)
@@ -226,6 +307,31 @@ func TestXDRDecoder_NestedCollections(t *testing.T) {
 				return xdr.ScVal{Type: xdr.ScValTypeScvMap, Map: &mapPtr}
 			}(),
 			`{"map":[]}`,
+		},
+		{
+			"vec containing contract instance",
+			func() xdr.ScVal {
+				inst := scContractInstance(wasmExecutable(), nil)
+				vec := xdr.ScVec{scSymbol("v1"), inst}
+				vecPtr := &vec
+				return xdr.ScVal{Type: xdr.ScValTypeScvVec, Vec: &vecPtr}
+			}(),
+			`{"vec":[{"symbol":"v1"},{"contract_instance":{"executable":{"wasm_hash":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"},"storage":[]}}]}`,
+		},
+		{
+			"map containing contract instance",
+			func() xdr.ScVal {
+				entry := xdr.ScMapEntry{
+					Key: scSymbol("instance"),
+					Val: scContractInstance(wasmExecutable(), &xdr.ScMap{
+						{Key: scSymbol("balance"), Val: scU64(1000)},
+					}),
+				}
+				scMap := xdr.ScMap{entry}
+				mapPtr := &scMap
+				return xdr.ScVal{Type: xdr.ScValTypeScvMap, Map: &mapPtr}
+			}(),
+			`{"map":[{"key":{"symbol":"instance"},"val":{"contract_instance":{"executable":{"wasm_hash":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"},"storage":[{"key":{"symbol":"balance"},"val":{"u64":1000}}]}}}]}`,
 		},
 	}
 

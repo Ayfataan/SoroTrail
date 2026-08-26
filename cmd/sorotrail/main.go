@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -527,9 +528,42 @@ func graphqlServerDeps(st store.Store, enricher api.Enricher) api.ServerDeps {
 	return api.ServerDeps{Store: st, Enricher: enricher}
 }
 
+// rpcURLsForLog returns the RPC endpoints to log at startup. An RPC URL may
+// carry basic-auth credentials in its userinfo, so the password is masked
+// before the value reaches the logger; RPC_URLS (the failover endpoints)
+// takes priority when set, otherwise the single RPC_URL is reported. Empty
+// entries are dropped so an unconfigured config logs as an empty list rather
+// than a single blank string.
 func rpcURLsForLog(cfg config.Config) []string {
+	var urls []string
 	if len(cfg.RPCURLS) > 0 {
-		return cfg.RPCURLS
+		urls = cfg.RPCURLS
+	} else {
+		urls = []string{cfg.RPCURL}
 	}
-	return []string{cfg.RPCURL}
+	out := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		if raw == "" {
+			continue
+		}
+		out = append(out, redactURLUserinfo(raw))
+	}
+	return out
+}
+
+// redactURLUserinfo masks the password portion of a URL's userinfo so
+// basic-auth credentials never reach log output. URLs without a password
+// — and unparseable ones, which config validation already rejects — are
+// returned unchanged.
+func redactURLUserinfo(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw
+	}
+	if u.User != nil {
+		if _, has := u.User.Password(); has {
+			u.User = url.UserPassword(u.User.Username(), "***")
+		}
+	}
+	return u.String()
 }

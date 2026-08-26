@@ -1,3 +1,6 @@
+// Package telemetry configures OpenTelemetry tracing for SoroTrail. Configure
+// returns a tracer provider, a shutdown function, and an error; tracing is
+// disabled and the provider is a no-op when no OTLP endpoint is configured.
 package telemetry
 
 import (
