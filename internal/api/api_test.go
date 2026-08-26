@@ -27,6 +27,63 @@ import (
 	"github.com/sorotrail/sorotrail/internal/store"
 )
 
+func TestWrapEnvelope(t *testing.T) {
+	tests := []struct {
+		name            string
+		data            any
+		cursor          string
+		wantData        any
+		wantCursor      string
+		wantCursorValue bool
+	}{
+		{
+			name:       "populated slice",
+			data:       []string{"one", "two"},
+			wantData:   []any{"one", "two"},
+			wantCursor: "",
+		},
+		{
+			name:     "nil typed slice",
+			data:     []string(nil),
+			wantData: []any{},
+		},
+		{
+			name:     "empty non-nil slice",
+			data:     []string{},
+			wantData: []any{},
+		},
+		{
+			name:            "non-empty cursor",
+			data:            []string{"one"},
+			cursor:          "next-page",
+			wantData:        []any{"one"},
+			wantCursor:      "next-page",
+			wantCursorValue: true,
+		},
+		{
+			name:     "empty cursor omitted",
+			data:     []string{"one"},
+			wantData: []any{"one"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(wrapEnvelope(tt.data, tt.cursor))
+			require.NoError(t, err)
+
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(body, &got))
+			assert.Equal(t, tt.wantData, got["data"])
+			if tt.wantCursorValue {
+				assert.Equal(t, tt.wantCursor, got["next_cursor"])
+			} else {
+				assert.NotContains(t, got, "next_cursor")
+			}
+		})
+	}
+}
+
 // stubStore implements store.Store for API tests.
 type stubStore struct {
 	mu        sync.Mutex
