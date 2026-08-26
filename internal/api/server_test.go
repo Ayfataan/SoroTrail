@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -40,4 +42,53 @@ func TestMetrics_ExposesIngestionLagGauge(t *testing.T) {
 	resp, body := doGet(t, s, "/metrics")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(body), "sorotrail_ingestion_lag_ledgers 21")
+}
+
+func TestServer_routePattern(t *testing.T) {
+	s := &Server{}
+
+	tests := []struct {
+		name     string
+		setup    func(*http.Request)
+		path     string
+		expected string
+	}{
+		{
+			name:     "no chi context",
+			path:     "/unknown",
+			expected: "/unknown",
+		},
+		{
+			name: "matched route returns chi pattern",
+			path: "/events/123",
+			setup: func(r *http.Request) {
+				rctx := chi.NewRouteContext()
+				rctx.RoutePatterns = []string{"/events/{id}"}
+				*r = *r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+			},
+			expected: "/events/{id}",
+		},
+		{
+			name: "unmatched request falls back to raw path",
+			path: "/unmatched",
+			setup: func(r *http.Request) {
+				rctx := chi.NewRouteContext()
+				*r = *r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+			},
+			expected: "/unmatched",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, tt.path, nil)
+			require.NoError(t, err)
+
+			if tt.setup != nil {
+				tt.setup(req)
+			}
+
+			assert.Equal(t, tt.expected, s.routePattern(req))
+		})
+	}
 }
