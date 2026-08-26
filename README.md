@@ -649,23 +649,42 @@ Shell
 curl -s localhost:8080/events/0001099511627776-0000000001
 ### `GET /contracts`
 
-Lists every contract the indexer has seen, with cached token metadata
-(name, symbol, decimals) when available. Metadata is `null` for contracts
-that haven't been enriched yet or that don't implement the SEP-41 token
-interface.
+Lists every indexed contract with per-contract activity: total event
+count, the ledger range it was seen in (`first_ledger`–`last_ledger`),
+and the wall-clock time of its most recent event (`last_seen`). Ordered
+by `contract_id` ascending; pass `sort=count&order=desc` to rank by
+activity instead.
+
+Paginated like `/events`: opaque `cursor`, `limit` 1–200 (default 50),
+`cursor` omitted on the last page. Optional `contract_id=` narrows the
+listing to contracts whose ID starts with the given prefix.
 
 ```sh
-curl -s localhost:8080/contracts
+curl -s localhost:8080/contracts?limit=50
 ```
 
 ```json
 {
   "contracts": [
-    {"contract_id":"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"},
-    {"contract_id":"CCW67...","name":"USD Coin","symbol":"USDC","decimals":6}
-  ]
+    {
+      "contract_id": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      "event_count": 1204,
+      "first_ledger": 250010,
+      "last_ledger": 260123,
+      "last_seen": "2026-08-01T12:34:56Z"
+    }
+  ],
+  "count": 1
 }
 ```
+
+| Param | Default | Notes |
+|---|---|---|
+| `limit` | `50` | Page size, 1–200. |
+| `cursor` | — | Opaque cursor from a previous response. |
+| `sort` | `contract_id` | One of `contract_id`, `count`, `first_ledger`, `last_ledger`, `last_seen`. |
+| `order` | `asc` for `contract_id`, else `desc` | Sort direction. |
+| `contract_id` | — | Prefix filter on the contract ID. |
 
 ### `GET /contracts/{id}/stats`
 
@@ -1577,6 +1596,20 @@ http://localhost:8080/docs/
 No external CDN is required — all assets (HTML, CSS, JS) are compiled into the
 binary via Go's `//go:embed` mechanism.
 
+### Editing the spec
+
+`api/openapi.yaml` is the source of truth. `internal/api/openapi.json` is the
+copy the binary embeds and serves at `/openapi.json`, and it is generated
+rather than hand-edited:
+
+```sh
+make spec
+```
+
+Editing the YAML without regenerating leaves the served spec behind, so
+`TestSpecCopiesAreIdentical` renders the YAML and compares bytes against the
+committed JSON.
+
 ### Route-drift validation
 
 A dedicated test ensures the router and the OpenAPI spec stay in sync:
@@ -1588,6 +1621,23 @@ go test ./pkg/docs/ -run TestNoRouteDrift -v
 The test reads `api/openapi.yaml`, walks the live chi router tree, and fails
 with `t.Fatalf` if the two diverge in either direction. Run it as part of CI
 to catch endpoint/spec drift before it reaches production.
+
+### Error-response validation
+
+Documenting a status the handlers never return is as misleading as omitting
+one they do, so the spec's failure responses are checked against the running
+router rather than reviewed by eye:
+
+```sh
+go test ./internal/api/ -run TestDocumentedErrorsMatchTheHandlers -v
+```
+
+Each case drives a real request through the real router until it produces a
+400, 401, 403, 404, 409, 429, 500, 501 or 503, then requires the spec to
+document that status on that route. Companion tests check the 429 documents
+its `Retry-After` header, the authentication failures name the scheme a
+caller has to satisfy, and every error body reaches the one shared
+`ErrorResponse` envelope through a `$ref` instead of restating it per path.
 
 ## License
 

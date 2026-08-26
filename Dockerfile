@@ -1,16 +1,10 @@
 # Build stage runs on the build host's native platform and cross-compiles,
 # so multi-arch builds don't pay for QEMU-emulated Go compilation.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-ARG VERSION=dev
-ARG COMMIT=unknown
-ARG DATE=unknown
-RUN CGO_ENABLED=0 go build \
-    -ldflags "-X github.com/khaylebfortune/sorotrail/internal/version.Version=${VERSION} -X github.com/khaylebfortune/sorotrail/internal/version.Commit=${COMMIT} -X github.com/khaylebfortune/sorotrail/internal/version.Date=${DATE}" \
-    -o /out/sorotrail ./cmd/sorotrail
 ARG TARGETOS TARGETARCH
 ARG VERSION=unknown
 ARG COMMIT=unknown
