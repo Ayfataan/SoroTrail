@@ -84,6 +84,7 @@ All configuration comes from environment variables (see
 
 Variable	Default	Description
 RPC_URL	https://soroban-testnet.stellar.org	Stellar RPC endpoint (JSON-RPC 2.0). Point at a provider URL for mainnet.
+RPC_RATE_LIMIT	10	Single-provider request rate limit (requests/second). Default matches the public endpoint limit — raising it against the public RPC will get you throttled; set higher only for paid plans or self-hosted RPCs. On 429 the client honors Retry-After (seconds or HTTP-date, capped at 60s).
 DATABASE_URL	— (required)	Postgres connection string.
 POLL_INTERVAL	5s	Sleep between polls once caught up.
 HTTP_ADDR	:8080	API listen address.
@@ -114,8 +115,11 @@ If the indexer is down long enough that its resume point falls out of the
 RPC's retention window, it logs a warning and skips ahead to the oldest
 retained ledger (the gap is unrecoverable from RPC — that's the problem this
 project exists to prevent).
-Requests are rate-limited (~10/s, matching public endpoint limits) and
-errors are retried with jittered exponential backoff.
+Requests are rate-limited (10/s by default, matching public endpoint limits —
+raise it via `RPC_RATE_LIMIT` only for paid plans or self-hosted RPCs) and
+errors are retried with jittered exponential backoff; when the provider
+responds 429 with a `Retry-After` header, that hint (seconds or HTTP-date,
+capped at 60s) is honored before falling back to computed backoff.
 Topics/values are stored as JSON. When the RPC supports xdrFormat: "json"
 its decoding is used verbatim; otherwise the base64 XDR is decoded locally
 into shapes like {"symbol":"transfer"}, {"u64":42}, {"i128":"-1000"},
@@ -134,6 +138,11 @@ All configuration comes from environment variables (see `.env.example`):
 | Variable | Default | Description |
 | --- | --- | --- |
 | `RPC_URL` | `https://soroban-testnet.stellar.org` | Stellar RPC endpoint (JSON-RPC 2.0). Point at a provider URL for mainnet. |
+| `RPC_RATE_LIMIT` | `10` | Request rate limit (`requests/second`) for the single-provider client. The default of 10 matches the public endpoint limit — raising it against the public RPC will get you throttled; set it higher only for paid provider plans or self-hosted RPCs whose allowance permits it. On HTTP 429 the client honors the provider's `Retry-After` header (delta-seconds or HTTP-date, capped at 60s) before falling back to exponential backoff. Ignored when `RPC_URLS` is set. |
+| `RPC_MAX_ATTEMPTS` | `3` | Maximum attempts (including the first) per failing RPC call before the error surfaces. |
+| `RPC_BASE_BACKOFF` | `500ms` | Initial retry backoff duration; doubles on each subsequent retry. |
+| `RPC_MAX_BACKOFF` | `30s` | Upper bound on the computed retry backoff. |
+| `RPC_JITTER` | `true` | Randomize each computed backoff to [0.5×, 1.5×) so concurrent retries don't thundering-herd the endpoint. Never applied to a provider's `Retry-After` hint. |
 | `RPC_URLS` | unset | Comma-separated, priority-ordered list of Stellar RPC endpoints. When set, `RPC_URL` is ignored and the multi-provider failover client is used. List order is priority: index 0 is tried first. |
 | `RPC_RATE_LIMIT_RPS` | `10` | Per-provider request rate limit (`requests/second`) applied to each RPC endpoint independently. Only used when `RPC_URLS` is set. |
 | `HORIZON_URL` | `https://horizon-testnet.stellar.org` | Stellar Horizon REST endpoint used by `sorotrail backfill` only. Live ingestion does not touch Horizon. |
@@ -244,8 +253,10 @@ should ensure the shortest retention window is ≥ the ingester's
   RPC's retention window, it logs a warning and skips ahead to the oldest
   retained ledger (the gap is unrecoverable from RPC — that's the problem this
   project exists to prevent).
-- Requests are rate-limited (~10/s, matching public endpoint limits) and
-  errors are retried with jittered exponential backoff.
+- Requests are rate-limited (10/s by default via `RPC_RATE_LIMIT` — the public
+  endpoint ceiling; raise it only for paid plans or self-hosted RPCs) and
+  errors are retried with jittered exponential backoff. A 429 carrying
+  `Retry-After` is honored (capped at 60s) ahead of computed backoff.
 - **Ingest-lag alarm**: every poll cycle compares the chain head (fetched via
   `getLatestLedger`) to the last ingested ledger. When the gap exceeds
   `LAG_WARN_LEDGERS` (default `100`), a single WARN-level structured log is
@@ -344,6 +355,7 @@ All configuration comes from environment variables (see
 
 Variable	Default	Description
 RPC_URL	https://soroban-testnet.stellar.org	Stellar RPC endpoint (JSON-RPC 2.0). Point at a provider URL for mainnet.
+RPC_RATE_LIMIT	10	Single-provider request rate limit (requests/second). Default matches the public endpoint limit — raising it against the public RPC will get you throttled; set higher only for paid plans or self-hosted RPCs. On 429 the client honors Retry-After (seconds or HTTP-date, capped at 60s).
 DATABASE_URL	— (required)	Postgres connection string.
 POLL_INTERVAL	5s	Sleep between polls once caught up.
 HTTP_ADDR	:8080	API listen address.
@@ -374,8 +386,11 @@ If the indexer is down long enough that its resume point falls out of the
 RPC's retention window, it logs a warning and skips ahead to the oldest
 retained ledger (the gap is unrecoverable from RPC — that's the problem this
 project exists to prevent).
-Requests are rate-limited (~10/s, matching public endpoint limits) and
-errors are retried with jittered exponential backoff.
+Requests are rate-limited (10/s by default, matching public endpoint limits —
+raise it via `RPC_RATE_LIMIT` only for paid plans or self-hosted RPCs) and
+errors are retried with jittered exponential backoff; when the provider
+responds 429 with a `Retry-After` header, that hint (seconds or HTTP-date,
+capped at 60s) is honored before falling back to computed backoff.
 Topics/values are stored as JSON. When the RPC supports xdrFormat: "json"
 its decoding is used verbatim; otherwise the base64 XDR is decoded locally
 into shapes like {"symbol":"transfer"}, {"u64":42}, {"i128":"-1000"},

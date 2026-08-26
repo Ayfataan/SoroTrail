@@ -12,7 +12,7 @@ import (
 const validContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
 
 var envKeys = []string{
-	"RPC_URL", "RPC_URLS", "RPC_RATE_LIMIT_RPS", "DATABASE_URL",
+	"RPC_URL", "RPC_URLS", "RPC_RATE_LIMIT_RPS", "RPC_RATE_LIMIT", "DATABASE_URL",
 	"POLL_INTERVAL", "HTTP_ADDR",
 	"WATCHED_CONTRACTS", "START_LEDGER", "RETENTION_LEDGERS", "LOG_LEVEL", "LOG_FORMAT",
 	"API_QUERY_TIMEOUT", "API_SLOW_QUERY_THRESHOLD",
@@ -466,6 +466,42 @@ func TestLoad(t *testing.T) {
 				"RPC_RATE_LIMIT_RPS": "0",
 			},
 			wantErr: "RPC_RATE_LIMIT_RPS must be positive",
+		},
+		{
+			name: "RPC_RATE_LIMIT defaults to 10",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/db",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, float64(10), c.RPCRateLimit,
+					"default keeps today's ~10 req/s public-endpoint pacing")
+			},
+		},
+		{
+			name: "RPC_RATE_LIMIT custom value",
+			env: map[string]string{
+				"DATABASE_URL":   "postgres://localhost/db",
+				"RPC_RATE_LIMIT": "50",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, float64(50), c.RPCRateLimit)
+			},
+		},
+		{
+			name: "RPC_RATE_LIMIT zero rejected",
+			env: map[string]string{
+				"DATABASE_URL":   "postgres://localhost/db",
+				"RPC_RATE_LIMIT": "0",
+			},
+			wantErr: "RPC_RATE_LIMIT must be positive",
+		},
+		{
+			name: "RPC_RATE_LIMIT negative rejected",
+			env: map[string]string{
+				"DATABASE_URL":   "postgres://localhost/db",
+				"RPC_RATE_LIMIT": "-3",
+			},
+			wantErr: "RPC_RATE_LIMIT must be positive",
 		},
 		{
 			name: "MAX_EVENTS_PER_CYCLE defaults to disabled",
