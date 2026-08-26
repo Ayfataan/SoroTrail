@@ -2029,11 +2029,14 @@ func (s *Server) addStatsFreshness(ctx context.Context, stats *store.Stats) {
 }
 
 func ingestLagLedgers(chainHead, lastIngested int64) int64 {
-	if lastIngested <= 0 {
+	if chainHead <= 0 || lastIngested <= 0 {
 		return 0
 	}
-	return chainHead - lastIngested
-
+	lag := chainHead - lastIngested
+	if lag < 0 {
+		return 0
+	}
+	return lag
 }
 
 func (s *Server) listCachePolicy(ctx context.Context, filter store.EventFilter) (cacheability, string, error) {
