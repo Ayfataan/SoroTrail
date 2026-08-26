@@ -38,6 +38,41 @@ func TestEventsIngestedTotal_SingleSuccess(t *testing.T) {
 		"counter must equal the number of events persisted in one successful write")
 }
 
+func TestWriteBatchSize(t *testing.T) {
+	tests := []struct {
+		name      string
+		batchSize uint
+		wantSizes []int
+	}{
+		{name: "default writes one batch", wantSizes: []int{5}},
+		{name: "configured size splits writes", batchSize: 2, wantSizes: []int{2, 2, 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &mockRPC{eventsResps: []rpc.GetEventsResponse{{
+				Events: []rpc.Event{
+					rpcEvent("e1", 100), rpcEvent("e2", 100), rpcEvent("e3", 100),
+					rpcEvent("e4", 100), rpcEvent("e5", 100),
+				},
+				LatestLedger: 500,
+			}}}
+			st := newMockStore()
+			ing := newTestIngester(client, st, Options{
+				StartLedger:    100,
+				PageLimit:      100,
+				WriteBatchSize: tt.batchSize,
+			})
+
+			_, err := ing.runOnce(context.Background())
+			require.NoError(t, err)
+			require.Len(t, st.upserted, len(tt.wantSizes))
+			for i, wantSize := range tt.wantSizes {
+				assert.Len(t, st.upserted[i], wantSize)
+			}
+		})
+	}
+}
+
 // TestSetIngestionLag covers the #237 gauge: it must be the difference
 // between the RPC chain head and the last ingested ledger, and a no-op
 // whenever either side is unknown (≤ 0).

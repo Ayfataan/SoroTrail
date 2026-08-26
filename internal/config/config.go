@@ -44,6 +44,8 @@ type Config struct {
 	WatchedContracts      []string      `env:"WATCHED_CONTRACTS"`
 	StartLedger           uint32        `env:"START_LEDGER"`
 	RetentionLedgers      uint32        `env:"RETENTION_LEDGERS" envDefault:"17280"`
+	IngestPageSize        uint          `env:"INGEST_PAGE_SIZE" envDefault:"1000"`
+	IngestBatchSize       uint          `env:"INGEST_BATCH_SIZE" envDefault:"1000"`
 	PartitionLedgerSpan   uint32        `env:"PARTITION_LEDGER_SPAN" envDefault:"120960"`
 	LogLevel              string        `env:"LOG_LEVEL" envDefault:"info"`
 	LogFormat             string        `env:"LOG_FORMAT" envDefault:"text"`
@@ -382,6 +384,12 @@ func (c Config) Validate() error {
 	}
 	if c.RetentionBatchSize <= 0 {
 		return fmt.Errorf("RETENTION_BATCH_SIZE must be positive")
+	}
+	if c.IngestPageSize == 0 {
+		return fmt.Errorf("INGEST_PAGE_SIZE must be positive")
+	}
+	if c.IngestBatchSize == 0 {
+		return fmt.Errorf("INGEST_BATCH_SIZE must be positive")
 	}
 	if c.RetentionPause < 0 {
 		return fmt.Errorf("RETENTION_PAUSE must be non-negative")
