@@ -59,6 +59,9 @@ type Config struct {
 	RetentionBatchSize int           `env:"RETENTION_BATCH_SIZE" envDefault:"5000"`
 	RetentionPause     time.Duration `env:"RETENTION_PAUSE" envDefault:"100ms"`
 	RetentionInterval  time.Duration `env:"RETENTION_INTERVAL" envDefault:"1h"`
+	// RetentionDryRun, when true, makes the pruner report what it
+	// would delete without actually removing any rows.
+	RetentionDryRun bool `env:"RETENTION_DRY_RUN"`
 
 	// LagWarnLedgers triggers a warn-level log when the ingester falls this
 	// many ledgers behind the chain head. Zero disables the alarm.

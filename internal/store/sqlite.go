@@ -845,6 +845,23 @@ func (s *SQLite) DeleteEventsBeforeLedger(ctx context.Context, beforeLedger int6
 	rows, _ := result.RowsAffected()
 	return rows, nil
 }
+func (s *SQLite) CountEventsBefore(ctx context.Context, maxLedger int64, beforeTime time.Time, limit int) (int64, error) {
+	var where string
+	var args []interface{}
+	where = "ledger < ?"
+	args = append(args, maxLedger)
+	if !beforeTime.IsZero() {
+		where += " AND created_at < ?"
+		args = append(args, beforeTime)
+	}
+	var total int64
+	query := "SELECT count(*) FROM (SELECT 1 FROM events WHERE " + where + " LIMIT " + fmt.Sprintf("%d", limit) + ")"
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("counting events before ledger %d: %w", maxLedger, err)
+	}
+	return total, nil
+}
 
 func (s *SQLite) GetAddressSummary(ctx context.Context, address string) (AddressSummary, error) {
 	var sum AddressSummary

@@ -293,6 +293,7 @@ func run() error {
 		BatchSize: cfg.RetentionBatchSize,
 		Pause:     cfg.RetentionPause,
 		Interval:  cfg.RetentionInterval,
+		DryRun:    cfg.RetentionDryRun,
 	})
 	if cfg.RetentionEnabled() {
 		api.SetPruner(prn)
