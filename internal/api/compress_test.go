@@ -589,3 +589,47 @@ func TestCompress_ListEndpointDeflate(t *testing.T) {
 	require.NoError(t, json.Unmarshal(out, &evs))
 	assert.Len(t, evs.Events, 30)
 }
+
+func TestWeakenETag(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(http.Header)
+		expected string
+	}{
+		{
+			name: "strong ETag gains W/ prefix",
+			setup: func(h http.Header) {
+				h.Set("ETag", `"v1"`)
+			},
+			expected: `W/"v1"`,
+		},
+		{
+			name: "already-weak ETag is left alone",
+			setup: func(h http.Header) {
+				h.Set("ETag", `W/"v1"`)
+			},
+			expected: `W/"v1"`,
+		},
+		{
+			name: "missing ETag header is a no-op",
+			setup: func(h http.Header) {},
+			expected: "",
+		},
+		{
+			name: "empty ETag value is a no-op",
+			setup: func(h http.Header) {
+				h.Set("ETag", "")
+			},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := make(http.Header)
+			tt.setup(h)
+			weakenETag(h)
+			assert.Equal(t, tt.expected, h.Get("ETag"))
+		})
+	}
+}
