@@ -528,17 +528,28 @@ func (ing *Ingester) reingestBatch(ctx context.Context, client rpc.Client, fromL
 				collected = append(collected, e)
 			}
 		}
-		if uint(len(resp.Events)) < ing.opts.PageLimit {
+		if len(resp.Events) == 0 {
 			break
 		}
 		last := resp.Events[len(resp.Events)-1]
+		// A short page is only terminal when the RPC supplies no
+		// continuation cursor: some endpoints return fewer results than
+		// requested while more data remains, and stopping here would make
+		// ReplaceEventsInRange delete rows that were never re-fetched.
+		if uint(len(resp.Events)) < ing.opts.PageLimit && resp.Cursor == "" {
+			break
+		}
 		if last.Ledger > toLedger {
 			break
 		}
-		cursor = resp.Cursor
-		if cursor == "" {
-			cursor = last.CursorValue()
+		next := resp.Cursor
+		if next == "" {
+			next = last.CursorValue()
 		}
+		if next == cursor {
+			break // non-advancing cursor: stop rather than spin forever
+		}
+		cursor = next
 	}
 	storeEvents := make([]store.Event, 0, len(collected))
 	for _, re := range collected {
@@ -716,6 +727,12 @@ func (ing *Ingester) windowSweepUnwatched(ctx context.Context, start uint32, bat
 //
 // ledgerOutOfRange is a side-channel for IsLedgerOutOfRange that survives
 // the errgroup canceling sibling goroutines — see windowSweep's comment.
+//
+// Short pages: a page with fewer events than requested is treated as
+// terminal only when it carries no top-level cursor. An RPC that returns
+// short-but-cursored pages (internal caps, filtering, load shedding) is
+// paged to completion instead, so the window is never marked complete over
+// unfetched data; a non-advancing cursor terminates the loop defensively.
 func (ing *Ingester) sweepBatch(ctx context.Context, ledgerOutOfRange *atomic.Bool, remaining *atomic.Int64, capHit *atomic.Bool, start, end uint32, filters []rpc.EventFilter) error {
 	cursor := ""
 	for {
@@ -754,7 +771,7 @@ func (ing *Ingester) sweepBatch(ctx context.Context, ledgerOutOfRange *atomic.Bo
 		if remaining != nil {
 			remaining.Add(-int64(len(resp.Events)))
 		}
-		if uint(len(resp.Events)) < uint(limit) {
+		if len(resp.Events) == 0 {
 			return nil
 		}
 		// Cursor requests can't carry the ledger range, so enforce the
@@ -762,9 +779,30 @@ func (ing *Ingester) sweepBatch(ctx context.Context, ledgerOutOfRange *atomic.Bo
 		if resp.Events[len(resp.Events)-1].Ledger > end {
 			return nil
 		}
-		if cursor = resp.Cursor; cursor == "" {
-			cursor = resp.Events[len(resp.Events)-1].CursorValue()
+		next := resp.Cursor
+		if next == "" {
+			next = resp.Events[len(resp.Events)-1].CursorValue()
 		}
+		short := uint(len(resp.Events)) < uint(limit)
+		if short && resp.Cursor == "" {
+			// A short page with no continuation hint really is the end
+			// of this batch's data.
+			return nil
+		}
+		if next == cursor {
+			// The RPC keeps handing back the same cursor; stopping beats
+			// spinning forever on a page that never advances.
+			return nil
+		}
+		if short {
+			// Short page but the RPC says more data follows: tolerate the
+			// shortfall and keep paging. Declaring the batch done here
+			// would let windowSweep advance the frontier past events that
+			// were never fetched.
+			ing.log.Debug("short getEvents page carried a cursor; continuing",
+				"got", len(resp.Events), "requested", limit)
+		}
+		cursor = next
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
