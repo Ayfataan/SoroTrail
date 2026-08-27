@@ -103,11 +103,6 @@ flags:
 	return nil
 }
 
-// errInterrupted reports a replay that stopped early. main turns it into a
-// distinct exit code so scripts can tell "stopped early, re-run me" from
-// "finished" — and from a genuine failure.
-var errInterrupted = errors.New("replay interrupted")
-
 func printReplaySummary(s replay.Summary, dryRun bool) {
 	mode := ""
 	if dryRun {
