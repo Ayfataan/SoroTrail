@@ -391,7 +391,6 @@ func (s *guardedStore) DeleteEventsBeforeLedger(ctx context.Context, beforeLedge
 	return n, err
 }
 
-
 func (s *guardedStore) DeleteEventsBefore(ctx context.Context, maxLedger int64, beforeTime time.Time, limit int) (int64, error) {
 	ctx, cancel := s.wrapContext(ctx, "store.DeleteEventsBefore")
 	defer cancel()

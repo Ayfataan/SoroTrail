@@ -269,6 +269,7 @@ func (c *ClickHouse) CountContracts(context.Context, ContractsFilter) (int64, er
 func (c *ClickHouse) DeleteEventsBefore(context.Context, int64, time.Time, int) (int64, error) {
 	return 0, nil
 }
+
 // CountEventsBefore is a stub: dry-run pruning is not implemented for the ClickHouse backend.
 func (c *ClickHouse) CountEventsBefore(context.Context, int64, time.Time, int) (int64, error) {
 	return 0, nil

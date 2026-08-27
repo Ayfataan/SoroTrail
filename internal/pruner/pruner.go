@@ -62,9 +62,10 @@ func (o *Options) applyDefaults() {
 // atomics on the Pruner so the JSON serialization sees plain values without
 // touching any internals.
 type Metrics struct {
-	RunsCompleted   uint64 `json:"runs_completed"`
-	TotalRowsPurged int64  `json:"total_rows_purged"`
-	ArchivedRanges  int64  `json:"archived_ranges,omitempty"`
+	RunsCompleted      uint64 `json:"runs_completed"`
+	TotalRowsPurged    int64  `json:"total_rows_purged"`
+	ArchivedRanges     int64  `json:"archived_ranges,omitempty"`
+	DryRunEligibleRows int64  `json:"dry_run_eligible_rows,omitempty"`
 }
 
 // Pruner is the background retention-policy job.
@@ -91,9 +92,10 @@ type Pruner struct {
 // forcing callers to take a lock.
 func (p *Pruner) Metrics() Metrics {
 	return Metrics{
-		RunsCompleted:   p.runsCompleted.Load(),
-		TotalRowsPurged: p.rowsPurged.Load(),
-		ArchivedRanges:  p.archivedRanges.Load(),
+		RunsCompleted:      p.runsCompleted.Load(),
+		TotalRowsPurged:    p.rowsPurged.Load(),
+		ArchivedRanges:     p.archivedRanges.Load(),
+		DryRunEligibleRows: p.dryRunEligible.Load(),
 	}
 }
 
