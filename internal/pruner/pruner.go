@@ -36,6 +36,11 @@ type Options struct {
 	// Archiver was configured. When false (the default), events are
 	// deleted directly without archival.
 	ArchiveBeforePrune bool
+	// DryRun, when true, reports what pruneOnce would delete without
+	// removing any rows. The dry-run sweep populates DryRunEligibleRows
+	// in the Metrics snapshot so operators can validate retention policy
+	// before enabling actual deletion.
+	DryRun bool
 }
 
 // DefaultValues used when Options fields are zero.
@@ -85,6 +90,7 @@ type Pruner struct {
 	runsCompleted  atomic.Uint64
 	rowsPurged     atomic.Int64
 	archivedRanges atomic.Int64
+	dryRunEligible atomic.Int64
 }
 
 // Metrics returns a value-copy snapshot of the pruner's counters.
