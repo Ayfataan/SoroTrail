@@ -204,3 +204,112 @@ func TestIntervalLimiter_SerializesParallelCalls(t *testing.T) {
 			"calls %d→%d elapsed=%v must be ≥ %v (interval)", i-1, i, gap, interval)
 	}
 }
+
+// TestWithRateLimitRPS is issue #58's rate-knob acceptance criterion:
+// RPC_RATE_LIMIT=50 must raise the client's request ceiling accordingly,
+// while a non-positive value keeps the default public-endpoint spacing.
+func TestWithRateLimitRPS(t *testing.T) {
+	c := NewHTTPClient("http://localhost", WithRateLimitRPS(50))
+	require.NotNil(t, c.limiter)
+	assert.Equal(t, 20*time.Millisecond, c.limiter.interval,
+		"50 req/s ⇒ 20ms minimum spacing")
+
+	c = NewHTTPClient("http://localhost", WithRateLimitRPS(10))
+	require.NotNil(t, c.limiter)
+	assert.Equal(t, 100*time.Millisecond, c.limiter.interval,
+		"default 10 req/s matches the historical hardcoded spacing")
+
+	c = NewHTTPClient("http://localhost", WithRateLimitRPS(0))
+	require.NotNil(t, c.limiter)
+	assert.Equal(t, 100*time.Millisecond, c.limiter.interval,
+		"non-positive rps keeps the client default (config.Load rejects it anyway)")
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{name: "empty", header: "", want: 0},
+		{name: "delta seconds", header: "30", want: 30 * time.Second},
+		{name: "delta seconds padded", header: " 7 ", want: 7 * time.Second},
+		{name: "delta zero", header: "0", want: 0},
+		{name: "delta negative", header: "-5", want: 0},
+		{name: "garbage", header: "soon", want: 0},
+		{
+			name:   "http date in future",
+			header: time.Now().UTC().Add(2 * time.Minute).Format(http.TimeFormat),
+			want:   119 * time.Second, // ±1s tolerance handled by caller below
+		},
+		{
+			name:   "http date already elapsed",
+			header: time.Now().UTC().Add(-2 * time.Minute).Format(http.TimeFormat),
+			want:   0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseRetryAfter(tt.header)
+			if tt.name == "http date in future" {
+				assert.GreaterOrEqual(t, got, 118*time.Second)
+				assert.LessOrEqual(t, got, 120*time.Second)
+				return
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestHTTP429SurfacesRetryAfter verifies that a provider-side HTTP 429
+// becomes a typed RateLimitedError carrying both Retry-After formats —
+// delta-seconds and HTTP-date — so the retry layer can honor the hint.
+func TestHTTP429SurfacesRetryAfter(t *testing.T) {
+	tests := []struct {
+		name       string
+		retryAfter string
+		wantHint   time.Duration
+	}{
+		{
+			name:       "delta seconds",
+			retryAfter: "2",
+			wantHint:   2 * time.Second,
+		},
+		{
+			name:       "http date",
+			retryAfter: time.Now().UTC().Add(90 * time.Second).Format(http.TimeFormat),
+			wantHint:   89 * time.Second,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", tt.retryAfter)
+				http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
+			}))
+			defer srv.Close()
+
+			c := NewHTTPClient(srv.URL, WithMinRequestInterval(0))
+			_, err := c.GetHealth(context.Background())
+			require.Error(t, err)
+
+			var rle *RateLimitedError
+			require.ErrorAs(t, err, &rle, "429 must surface as *RateLimitedError")
+			assert.Equal(t, http.StatusTooManyRequests, rle.StatusCode)
+			assert.GreaterOrEqual(t, rle.RetryAfter, tt.wantHint-2*time.Second)
+			assert.LessOrEqual(t, rle.RetryAfter, tt.wantHint+3*time.Second)
+			assert.Contains(t, err.Error(), "rate limited")
+		})
+	}
+
+	// Without the header the hint is zero and callers fall back to backoff.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	c := NewHTTPClient(srv.URL, WithMinRequestInterval(0))
+	_, err := c.GetHealth(context.Background())
+	var rle *RateLimitedError
+	require.ErrorAs(t, err, &rle)
+	assert.Zero(t, rle.RetryAfter, "absent Retry-After ⇒ zero hint")
+}

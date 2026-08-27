@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -190,7 +191,19 @@ func run() error {
 	// Shared broadcaster for live event streaming across all networks.
 	bcast := broadcast.New(broadcast.DefaultBufferSize)
 
-	rpcClient := rpc.NewHTTPClient(cfg.RPCURL)
+	// Single-provider client: the interval limiter caps the request rate
+	// at RPC_RATE_LIMIT (default 10 req/s, the public endpoint limit) and
+	// the retry wrapper applies the configured backoff, honoring any
+	// Retry-After hint a rate-limiting provider sends (issue #58).
+	rpcClient := rpc.NewRetryClient(
+		rpc.NewHTTPClient(cfg.RPCURL, rpc.WithRateLimitRPS(cfg.RPCRateLimit)),
+		rpc.RetryConfig{
+			MaxAttempts: cfg.RPCMaxAttempts,
+			BaseBackoff: cfg.RPCBaseBackoff,
+			MaxBackoff:  cfg.RPCMaxBackoff,
+			Jitter:      cfg.RPCJitter,
+			Logger:      log,
+		})
 	wh := webhook.NewNotifier(st, log)
 
 	// Wire the spec cache and enricher for spec-decoded event views.
@@ -236,9 +249,14 @@ func run() error {
 		PollInterval:            cfg.PollInterval,
 		StartLedger:             cfg.StartLedger,
 		RetentionLedgers:        cfg.RetentionLedgers,
+		PageLimit:               cfg.IngestPageSize,
+		WriteBatchSize:          cfg.IngestBatchSize,
 		LagWarnLedgers:          cfg.LagWarnLedgers,
 		SweepConcurrency:        cfg.SweepConcurrency,
 		MaxEventsPerCycle:       cfg.MaxEventsPerCycle,
+		BatchSize:               cfg.BatchSize,
+		BatchTargetLatency:      cfg.BatchTargetLatency,
+		BatchMaxBackoff:         cfg.BatchMaxBackoff,
 		ReorgConfirmationWindow: cfg.ReorgConfirmationWindow,
 		ReorgRescanInterval:     cfg.ReorgRescanInterval,
 	}).WithBroadcaster(bcast)
@@ -308,6 +326,7 @@ func run() error {
 	api.SetMaxLimit(cfg.APIMaxLimit)
 
 	apiServer := api.New(apiStore, countingClient, log, cfg.APIKey, specEnricher).WithBroadcaster(bcast)
+	apiServer.SetStatsTTL(cfg.StatsCacheTTL)
 	apiServer.SetRateLimiter(limiter)
 	apiServer.SetMetricsEnabled(cfg.MetricsEnabled)
 	apiServer.SetCompressMinSize(cfg.CompressMinSize)
@@ -316,6 +335,7 @@ func run() error {
 		AllowedOrigins: cfg.CORSAllowedOrigins,
 		AllowedMethods: cfg.CORSAllowedMethods,
 		AllowedHeaders: cfg.CORSAllowedHeaders,
+		ExposedHeaders: cfg.CORSExposedHeaders,
 	})
 
 	// GraphQL transport: reads against the same store + spec enricher
@@ -497,14 +517,7 @@ func bootstrapAdminKey(ctx context.Context, ts store.TenantStore, key string, lo
 
 func newLogger(level, format string) *slog.Logger {
 	opts := &slog.HandlerOptions{Level: config.ParseLogLevel(level)}
-	var h slog.Handler
-	switch strings.ToLower(format) {
-	case "json":
-		h = slog.NewJSONHandler(os.Stdout, opts)
-	default:
-		h = slog.NewTextHandler(os.Stdout, opts)
-	}
-	return slog.New(h)
+	return slog.New(config.NewLogHandler(os.Stdout, format, opts))
 }
 
 // graphqlServerDeps wraps the live store + enricher into the typed
@@ -514,9 +527,42 @@ func graphqlServerDeps(st store.Store, enricher api.Enricher) api.ServerDeps {
 	return api.ServerDeps{Store: st, Enricher: enricher}
 }
 
+// rpcURLsForLog returns the RPC endpoints to log at startup. An RPC URL may
+// carry basic-auth credentials in its userinfo, so the password is masked
+// before the value reaches the logger; RPC_URLS (the failover endpoints)
+// takes priority when set, otherwise the single RPC_URL is reported. Empty
+// entries are dropped so an unconfigured config logs as an empty list rather
+// than a single blank string.
 func rpcURLsForLog(cfg config.Config) []string {
+	var urls []string
 	if len(cfg.RPCURLS) > 0 {
-		return cfg.RPCURLS
+		urls = cfg.RPCURLS
+	} else {
+		urls = []string{cfg.RPCURL}
 	}
-	return []string{cfg.RPCURL}
+	out := make([]string, 0, len(urls))
+	for _, raw := range urls {
+		if raw == "" {
+			continue
+		}
+		out = append(out, redactURLUserinfo(raw))
+	}
+	return out
+}
+
+// redactURLUserinfo masks the password portion of a URL's userinfo so
+// basic-auth credentials never reach log output. URLs without a password
+// — and unparseable ones, which config validation already rejects — are
+// returned unchanged.
+func redactURLUserinfo(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw
+	}
+	if u.User != nil {
+		if _, has := u.User.Password(); has {
+			u.User = url.UserPassword(u.User.Username(), "***")
+		}
+	}
+	return u.String()
 }

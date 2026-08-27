@@ -685,6 +685,11 @@ type Store interface {
 	// returned cursor encodes the last row's id so a follow-up call
 	// resumes cleanly.
 	ListDeadLetters(ctx context.Context, contractID string, limit int, cursor string) ([]DeadLetter, string, error)
+	// CountDeadLetters returns the total number of dead-letter rows
+	// matching the same contract filter as ListDeadLetters ("" means
+	// all contracts). Pagination is ignored: the count is the full
+	// match set behind any page, and feeds the X-Total-Count header.
+	CountDeadLetters(ctx context.Context, contractID string) (int64, error)
 	// GetDeadLetter returns a single row by id, or ErrNotFound.
 	GetDeadLetter(ctx context.Context, id int64) (DeadLetter, error)
 	// DeleteDeadLetter removes a row (call after the row has been
@@ -755,6 +760,10 @@ type Store interface {
 	// newest first. Owner-filtered: delivery history reveals which events
 	// matched, so it is as sensitive as the subscription itself.
 	ListDeliveryAttempts(ctx context.Context, subscriptionID int64, limit int, owner SubscriptionOwner) ([]DeliveryAttempt, error)
+	// CountDeliveryAttempts returns the total number of delivery attempts
+	// recorded for a subscription, applying the same owner filter as
+	// ListDeliveryAttempts so a tenant cannot count another's history.
+	CountDeliveryAttempts(ctx context.Context, subscriptionID int64, owner SubscriptionOwner) (int64, error)
 
 	// GetContractSpec returns the JSON-serialized spec for a wasm_hash,
 	// or ErrNotFound when no spec is cached for that hash.

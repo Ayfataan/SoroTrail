@@ -33,12 +33,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                checks:
+                  database: ok
+                  rpc: ok
         "503":
           description: One or more dependencies degraded
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: degraded
+                checks:
+                  database: ok
+                  rpc: unavailable
   /events:
     get:
       operationId: listEvents
@@ -63,14 +73,39 @@ paths:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"
         - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/OrderBy"
         - $ref: "#/components/parameters/Decoded"
       responses:
         "200":
           description: A page of events
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of events matching the request's filters,
+                ignoring pagination. Omitted when the count could not be
+                computed; the page itself is still returned.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/EventsResponse"
+              example:
+                events:
+                  - id: "0001099511627776-0000000001"
+                    contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                    ledger: 256000
+                    type: contract
+                    tx_hash: "9f5c7a2b..."
+                    tx_index: 0
+                    op_index: 0
+                    in_successful_call: true
+                    topics:
+                      - {"symbol":"transfer"}
+                    value: {"address":"GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR"}
+                    created_at: "2026-07-21T12:00:00Z"
+                cursor: "MjU2MDAwLTAwMDAwMDAwMDE="
         "304":
           $ref: "#/components/responses/NotModified"
         "400":
@@ -91,12 +126,33 @@ paths:
         retention maintenance; gated behind the management credential.
       tags: [Operations]
       parameters:
-        - $ref: "#/components/parameters/ToLedger"
+        - name: before_ledger
+          in: query
+          required: true
+          description: >-
+            Delete every stored event in a ledger strictly below this one.
+            Required: without it the request is refused rather than
+            defaulting to a bound that would delete everything.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+          example: 256000
       security:
         - ManagementKey: []
       responses:
         "200":
           description: Number of events deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: integer
+                    format: int64
+              example:
+                deleted: 42
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -116,7 +172,11 @@ paths:
         - name: id
           in: path
           required: true
-          description: TOID-based event identifier
+          description: >-
+            TOID-based event identifier: the 16-digit ledger/transaction/
+            operation offset, a hyphen, and a 10-digit index within the
+            operation. Take it from an event in a listing rather than
+            composing it.
           schema:
             type: string
             pattern: "^[0-9]{16}-[0-9]{10}$"
@@ -131,6 +191,19 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/Event"
                   - $ref: "#/components/schemas/EnrichedEvent"
+              example:
+                id: "0001099511627776-0000000001"
+                contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                ledger: 256000
+                type: contract
+                tx_hash: "9f5c7a2b..."
+                tx_index: 0
+                op_index: 0
+                in_successful_call: true
+                topics:
+                  - {"symbol":"transfer"}
+                value: {"address":"GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR"}
+                created_at: "2026-07-21T12:00:00Z"
         "304":
           $ref: "#/components/responses/NotModified"
         "400":
@@ -153,10 +226,10 @@ paths:
         - name: id
           in: path
           required: true
-          description: Stellar contract ID (C-prefixed)
+          description: The contract whose events to return.
           schema:
             type: string
-            pattern: "^C[A-Z0-9]{55}$"
+            pattern: "^C[A-Z2-7]{55}$"
           example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
         - $ref: "#/components/parameters/EventType"
         - $ref: "#/components/parameters/Topic"
@@ -171,14 +244,38 @@ paths:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"
         - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/OrderBy"
         - $ref: "#/components/parameters/Decoded"
       responses:
         "200":
           description: A page of events for the contract
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of events matching the request's filters,
+                ignoring pagination. Omitted when the count could not be
+                computed; the page itself is still returned.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/EventsResponse"
+              example:
+                events:
+                  - id: "0001099511627776-0000000001"
+                    contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                    ledger: 256000
+                    type: contract
+                    tx_hash: "9f5c7a2b..."
+                    tx_index: 0
+                    op_index: 0
+                    in_successful_call: true
+                    topics:
+                      - {"symbol":"transfer"}
+                    value: {"address":"GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR"}
+                    created_at: "2026-07-21T12:00:00Z"
         "304":
           $ref: "#/components/responses/NotModified"
         "400":
@@ -203,9 +300,12 @@ paths:
         - name: address
           in: path
           required: true
-          description: Stellar account (G-prefixed) or contract (C-prefixed) address
+          description: >-
+            Stellar account (G-prefixed) or contract (C-prefixed) address to
+            look for in the event topics.
           schema:
             type: string
+            pattern: "^[GC][A-Z2-7]{55}$"
           example: "GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR"
         - $ref: "#/components/parameters/FromLedger"
         - $ref: "#/components/parameters/ToLedger"
@@ -215,10 +315,33 @@ paths:
       responses:
         "200":
           description: A page of events involving the address
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of events matching the request's filters,
+                ignoring pagination. Omitted when the count could not be
+                computed; the page itself is still returned.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/EventsResponse"
+              example:
+                events:
+                  - id: "0001099511627776-0000000001"
+                    contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                    ledger: 256000
+                    type: contract
+                    tx_hash: "9f5c7a2b..."
+                    tx_index: 0
+                    op_index: 0
+                    in_successful_call: true
+                    topics:
+                      - {"symbol":"transfer"}
+                    value: {"address":"GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR"}
+                    created_at: "2026-07-21T12:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -239,9 +362,12 @@ paths:
         - name: address
           in: path
           required: true
-          description: Stellar account (G-prefixed) or contract (C-prefixed) address
+          description: >-
+            Stellar account (G-prefixed) or contract (C-prefixed) address to
+            summarise.
           schema:
             type: string
+            pattern: "^[GC][A-Z2-7]{55}$"
           example: "GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR"
       responses:
         "200":
@@ -250,6 +376,13 @@ paths:
             application/json:
               schema:
                 type: object
+              example:
+                address: "GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR"
+                first_ledger: 256000
+                last_ledger: 256050
+                event_count: 12
+                contracts:
+                  - "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -271,10 +404,25 @@ paths:
       responses:
         "200":
           description: Success
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of tenants, which is the full list since
+                this endpoint is not paginated.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
                 type: object
+              example:
+                tenants:
+                  - id: 1
+                    name: "acme-corp"
+                    enabled: true
+                    created_at: "2026-07-21T00:00:00Z"
+                count: 1
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -299,6 +447,11 @@ paths:
             application/json:
               schema:
                 type: object
+              example:
+                id: 1
+                name: "acme-corp"
+                enabled: true
+                created_at: "2026-07-21T00:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -325,10 +478,14 @@ paths:
         - name: id
           in: path
           required: true
-          description: Tenant ID
+          description: >-
+            Tenant ID, as returned by POST /admin/tenants. Must be a
+            positive integer.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 1
       responses:
         "200":
           description: Success
@@ -336,6 +493,11 @@ paths:
             application/json:
               schema:
                 type: object
+              example:
+                id: 1
+                name: "acme-corp"
+                enabled: true
+                created_at: "2026-07-21T00:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -359,10 +521,14 @@ paths:
         - name: id
           in: path
           required: true
-          description: Tenant ID
+          description: >-
+            Tenant ID, as returned by POST /admin/tenants. Must be a
+            positive integer.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 1
       responses:
         "200":
           description: Success
@@ -370,6 +536,11 @@ paths:
             application/json:
               schema:
                 type: object
+              example:
+                id: 1
+                name: "acme-corp"
+                enabled: true
+                created_at: "2026-07-21T00:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -395,10 +566,14 @@ paths:
         - name: id
           in: path
           required: true
-          description: Tenant ID
+          description: >-
+            Tenant ID, as returned by POST /admin/tenants. Must be a
+            positive integer.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 1
       responses:
         "204":
           description: Deleted
@@ -428,10 +603,25 @@ paths:
         - name: id
           in: path
           required: true
-          description: Tenant ID
+          description: >-
+            Tenant ID, as returned by POST /admin/tenants. Must be a
+            positive integer.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 1
+        - name: days
+          in: query
+          description: >-
+            How many days of usage history to return, counting back from
+            today.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 365
+            default: 30
+          example: 7
       responses:
         "200":
           description: Success
@@ -439,6 +629,11 @@ paths:
             application/json:
               schema:
                 type: object
+              example:
+                tenant_id: 1
+                period_days: 7
+                requests: 12345
+                events_served: 67890
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -463,17 +658,33 @@ paths:
         - name: id
           in: path
           required: true
-          description: Tenant ID
+          description: >-
+            Tenant ID, as returned by POST /admin/tenants. Must be a
+            positive integer.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 1
       responses:
         "200":
           description: Success
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of granted contracts, which is the full list
+                since this endpoint is not paginated.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
                 type: object
+              example:
+                grants:
+                  - "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                count: 1
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -497,10 +708,14 @@ paths:
         - name: id
           in: path
           required: true
-          description: Tenant ID
+          description: >-
+            Tenant ID, as returned by POST /admin/tenants. Must be a
+            positive integer.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 1
       responses:
         "200":
           description: >-
@@ -510,6 +725,11 @@ paths:
             application/json:
               schema:
                 type: object
+              example:
+                grants:
+                  - "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                  - "CAAAA..."
+                count: 2
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -534,21 +754,35 @@ paths:
         - name: id
           in: path
           required: true
-          description: Tenant ID
+          description: >-
+            Tenant ID, as returned by POST /admin/tenants. Must be a
+            positive integer.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 1
         - name: contract_id
           in: path
           required: true
-          description: Stellar contract ID (C-prefixed)
+          description: The contract grant to revoke from this tenant.
           schema:
             type: string
+            pattern: "^C[A-Z2-7]{55}$"
+          example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
       responses:
         "200":
           description: >-
             The tenant's refreshed grant list. Not a 204: the response carries
             the remaining grants.
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                grants:
+                  - "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                count: 1
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -573,17 +807,36 @@ paths:
         - name: id
           in: path
           required: true
-          description: Tenant ID
+          description: >-
+            Tenant ID, as returned by POST /admin/tenants. Must be a
+            positive integer.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 1
       responses:
         "200":
           description: Success
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of API keys, which is the full list since
+                this endpoint is not paginated.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
                 type: object
+              example:
+                keys:
+                  - id: 7
+                    prefix: "st_abc12"
+                    enabled: true
+                    created_at: "2026-07-21T00:00:00Z"
+                count: 1
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -607,10 +860,14 @@ paths:
         - name: id
           in: path
           required: true
-          description: Tenant ID
+          description: >-
+            Tenant ID, as returned by POST /admin/tenants. Must be a
+            positive integer.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 1
       responses:
         "201":
           description: Success
@@ -618,6 +875,12 @@ paths:
             application/json:
               schema:
                 type: object
+              example:
+                id: 7
+                prefix: "st_abc12"
+                key: "st_abc12_xylophone12345678"
+                enabled: true
+                created_at: "2026-07-21T00:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -642,10 +905,15 @@ paths:
         - name: key_id
           in: path
           required: true
-          description: API key ID
+          description: >-
+            API key ID, as returned by POST /admin/tenants/{id}/keys. This
+            is the key's database ID, not its public prefix and not the
+            plaintext key.
           schema:
             type: integer
             format: int64
+            minimum: 1
+          example: 7
       responses:
         "204":
           description: Deleted
@@ -672,11 +940,14 @@ paths:
         cursor that is omitted on the last page.
       tags: [Events]
       parameters:
-        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/ContractsLimit"
         - $ref: "#/components/parameters/Cursor"
         - name: sort
           in: query
-          description: Ordering key for the listing
+          description: >-
+            Ordering key for the listing. The default walks contract IDs
+            alphabetically, which is stable as new contracts are indexed;
+            count ranks by activity instead.
           schema:
             type: string
             enum: [contract_id, count, first_ledger, last_ledger, last_seen]
@@ -684,16 +955,38 @@ paths:
         - $ref: "#/components/parameters/Order"
         - name: contract_id
           in: query
-          description: Only list contracts whose ID starts with this prefix
+          description: >-
+            Only list contracts whose ID starts with this prefix. A prefix,
+            not a whole ID, so it is not validated as a strkey and a short
+            string is a legitimate value.
           schema:
             type: string
+            pattern: "^C[A-Z2-7]{0,55}$"
+          example: "CDLZ"
       responses:
         "200":
           description: A page of indexed contracts
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of contracts matching the request's filters,
+                ignoring pagination. Omitted when the count could not be
+                computed; the page itself is still returned.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ContractsPage"
+              example:
+                contracts:
+                  - contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                    event_count: 42
+                    first_ledger: 256000
+                    last_ledger: 256050
+                    last_seen: "2026-07-21T12:00:00Z"
+                count: 1
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -719,6 +1012,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                checks: {}
   /readyz:
     get:
       operationId: readyz
@@ -735,6 +1031,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                checks:
+                  database: ok
+                  rpc: ok
+                  ingestion: current
         "503":
           description: >-
             A dependency is unusable or ingestion is lagging. The body names
@@ -745,6 +1047,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: degraded
+                checks:
+                  database: ok
+                  rpc: unavailable
+                  ingestion: lagging (150 ledgers behind)
   /version:
     get:
       operationId: version
@@ -755,6 +1063,21 @@ paths:
       responses:
         "200":
           description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                  commit:
+                    type: string
+                  build_date:
+                    type: string
+              example:
+                version: "0.1.0"
+                commit: "dc0ff0d"
+                build_date: "2026-07-21T00:00:00Z"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "429":
@@ -799,10 +1122,30 @@ paths:
         Total number of events matching the filter, ignoring pagination.
       tags: [Operations]
       parameters:
-        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/ContractID"
+        - $ref: "#/components/parameters/EventType"
+        - $ref: "#/components/parameters/Topic"
+        - $ref: "#/components/parameters/Topic0"
+        - $ref: "#/components/parameters/Topic1"
+        - $ref: "#/components/parameters/Topic2"
+        - $ref: "#/components/parameters/Topic3"
+        - $ref: "#/components/parameters/FromLedger"
+        - $ref: "#/components/parameters/ToLedger"
+        - $ref: "#/components/parameters/FromTime"
+        - $ref: "#/components/parameters/ToTime"
       responses:
         "200":
           description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                    format: int64
+              example:
+                count: 42
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -820,9 +1163,60 @@ paths:
       description: >-
         Event counts bucketed by ledger or by a time interval.
       tags: [Operations]
+      parameters:
+        - $ref: "#/components/parameters/ContractID"
+        - $ref: "#/components/parameters/EventType"
+        - $ref: "#/components/parameters/Topic"
+        - $ref: "#/components/parameters/Topic0"
+        - $ref: "#/components/parameters/Topic1"
+        - $ref: "#/components/parameters/Topic2"
+        - $ref: "#/components/parameters/Topic3"
+        - $ref: "#/components/parameters/FromLedger"
+        - $ref: "#/components/parameters/ToLedger"
+        - $ref: "#/components/parameters/FromTime"
+        - $ref: "#/components/parameters/ToTime"
+        - name: bucket
+          in: query
+          required: true
+          description: >-
+            Grouping interval. Either the literal "ledger", which counts
+            events per ledger, or a Go duration string, which counts them
+            per interval of wall-clock time. Required: there is no default
+            grouping to fall back on.
+          schema:
+            type: string
+            pattern: "^(ledger|[0-9]+(ns|us|ms|s|m|h)([0-9]+(ns|us|ms|s|m|h))*)$"
+          examples:
+            perLedger:
+              summary: One bucket per ledger
+              value: ledger
+            hourly:
+              summary: One bucket per hour
+              value: 1h
       responses:
         "200":
           description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  buckets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key:
+                          type: string
+                        count:
+                          type: integer
+                          format: int64
+              example:
+                buckets:
+                  - key: "256000"
+                    count: 5
+                  - key: "256001"
+                    count: 3
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -839,8 +1233,19 @@ paths:
         Streaming CSV export of matching events.
       tags: [Operations]
       parameters:
-        - $ref: "#/components/parameters/Limit"
-        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/ContractID"
+        - $ref: "#/components/parameters/EventType"
+        - $ref: "#/components/parameters/Topic"
+        - $ref: "#/components/parameters/Topic0"
+        - $ref: "#/components/parameters/Topic1"
+        - $ref: "#/components/parameters/Topic2"
+        - $ref: "#/components/parameters/Topic3"
+        - $ref: "#/components/parameters/FromLedger"
+        - $ref: "#/components/parameters/ToLedger"
+        - $ref: "#/components/parameters/FromTime"
+        - $ref: "#/components/parameters/ToTime"
+        - $ref: "#/components/parameters/Order"
+        - $ref: "#/components/parameters/OrderBy"
       responses:
         "200":
           description: Success
@@ -865,12 +1270,34 @@ paths:
         - name: id
           in: path
           required: true
-          description: Event ID
+          description: >-
+            TOID-based event identifier: the 16-digit ledger/transaction/
+            operation offset, a hyphen, and a 10-digit index within the
+            operation. Take it from an event in a listing rather than
+            composing it.
           schema:
             type: string
+            pattern: "^[0-9]{16}-[0-9]{10}$"
+          example: "0001099511627776-0000000001"
       responses:
         "200":
           description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  topics_xdr:
+                    type: array
+                    items:
+                      type: string
+                  value_xdr:
+                    type: string
+              example:
+                topics_xdr:
+                  - "AAAAA"
+                  - "BBBBB"
+                value_xdr: "CCCCC"
         "304":
           $ref: "#/components/responses/NotModified"
         "401":
@@ -892,12 +1319,38 @@ paths:
         - name: id
           in: path
           required: true
-          description: Event ID
+          description: >-
+            TOID-based event identifier: the 16-digit ledger/transaction/
+            operation offset, a hyphen, and a 10-digit index within the
+            operation. Take it from an event in a listing rather than
+            composing it.
           schema:
             type: string
+            pattern: "^[0-9]{16}-[0-9]{10}$"
+          example: "0001099511627776-0000000001"
+        - $ref: "#/components/parameters/Decoded"
       responses:
         "200":
           description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Event"
+              example:
+                - id: "0001099511627776-0000000002"
+                  contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                  ledger: 256000
+                  type: contract
+                  tx_hash: "9f5c7a2b..."
+                  tx_index: 0
+                  op_index: 1
+                  in_successful_call: true
+                  topics:
+                    - {"symbol":"transfer"}
+                  value: {"address":"GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR"}
+                  created_at: "2026-07-21T12:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -921,9 +1374,11 @@ paths:
         - name: id
           in: path
           required: true
-          description: Stellar contract ID (C-prefixed)
+          description: The contract to describe.
           schema:
             type: string
+            pattern: "^C[A-Z2-7]{55}$"
+          example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
       responses:
         "200":
           description: Contract summary
@@ -952,6 +1407,12 @@ paths:
                     type: string
                     format: date-time
                     description: Timestamp of the most recent event
+              example:
+                contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                event_count: 42
+                first_ledger: 256000
+                last_ledger: 256050
+                last_seen: "2026-07-21T12:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -976,9 +1437,11 @@ paths:
         - name: id
           in: path
           required: true
-          description: Stellar contract ID (C-prefixed)
+          description: The contract to describe.
           schema:
             type: string
+            pattern: "^C[A-Z2-7]{55}$"
+          example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
       responses:
         "200":
           description: Contract statistics
@@ -1020,6 +1483,17 @@ paths:
                           type: integer
                           format: int64
                           description: Number of events of this type
+              example:
+                contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                name: "Soroban Token"
+                symbol: "STOK"
+                decimals: 7
+                event_count: 42
+                type_breakdown:
+                  - type: contract
+                    count: 38
+                  - type: diagnostic
+                    count: 4
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1041,9 +1515,44 @@ paths:
         - name: id
           in: path
           required: true
-          description: Stellar contract ID (C-prefixed)
+          description: The contract whose events to export.
           schema:
             type: string
+            pattern: "^C[A-Z2-7]{55}$"
+          example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+        - name: from_ledger
+          in: query
+          required: true
+          description: >-
+            Inclusive lower ledger bound. Required, and must not be greater
+            than to_ledger. Unlike the list endpoints the export refuses an
+            open-ended range outright, so a missing bound cannot drain the
+            database one stream at a time.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+          example: 256000
+        - name: to_ledger
+          in: query
+          required: true
+          description: >-
+            Inclusive upper ledger bound. Required. The span it forms with
+            from_ledger is capped by the EXPORT_MAX_RANGE environment
+            variable, so a wide range may be refused by a deployment even
+            though both bounds are individually valid.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+          example: 256999
+        - name: format
+          in: query
+          description: Serialisation of the exported stream.
+          schema:
+            type: string
+            enum: [csv, ndjson]
+            default: csv
       responses:
         "200":
           description: Success
@@ -1067,6 +1576,16 @@ paths:
       responses:
         "200":
           description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                id: 1
+                name: "acme-corp"
+                enabled: true
+                grants:
+                  - "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1084,9 +1603,30 @@ paths:
       description: >-
         Recorded request and event-served counters for the caller.
       tags: [Operations]
+      parameters:
+        - name: days
+          in: query
+          description: >-
+            How many days of usage history to return, counting back from
+            today.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 365
+            default: 30
+          example: 7
       responses:
         "200":
           description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                tenant_id: 1
+                period_days: 7
+                requests: 12345
+                events_served: 67890
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1109,6 +1649,22 @@ paths:
       responses:
         "200":
           description: Success
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of contracts the tenant watches, which is
+                the full list since this endpoint is not paginated.
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                contracts:
+                  - "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                count: 1
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1130,6 +1686,15 @@ paths:
           description: >-
             The tenant's refreshed watch list. Not a 201: the response is the
             whole list, not the created row.
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                contracts:
+                  - "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                  - "CAAAA..."
+                count: 2
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1153,14 +1718,24 @@ paths:
         - name: contract_id
           in: path
           required: true
-          description: Stellar contract ID (C-prefixed)
+          description: The contract to drop from the calling tenant's watch list.
           schema:
             type: string
+            pattern: "^C[A-Z2-7]{55}$"
+          example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
       responses:
         "200":
           description: >-
             The tenant's refreshed watch list. Not a 204: the response carries
             the remaining contracts.
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                contracts:
+                  - "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                count: 1
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1183,6 +1758,23 @@ paths:
       responses:
         "200":
           description: Success
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of watched contracts, which is the full list
+                since this endpoint is not paginated.
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                contracts:
+                  - contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                    start_ledger: 256000
+                count: 1
         "401":
           $ref: "#/components/responses/Unauthorized"
         "429":
@@ -1205,6 +1797,17 @@ paths:
             The refreshed watch list, plus the ledger ingestion for the new
             contract will start from. Not a 201: the response is the whole
             list, not the created row.
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                contracts:
+                  - contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                    start_ledger: 256000
+                  - contract_id: "CAAAA..."
+                    start_ledger: 256000
+                count: 2
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1226,9 +1829,20 @@ paths:
         - name: id
           in: path
           required: true
-          description: Stellar contract ID (C-prefixed)
+          description: The contract to stop following.
           schema:
             type: string
+            pattern: "^C[A-Z2-7]{55}$"
+          example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+        - name: confirm
+          in: query
+          description: >-
+            Must be "true" to remove the last watched contract, because
+            emptying the list switches ingestion back from a specific list
+            to all contract events. Not needed while other contracts remain.
+          schema:
+            type: string
+            enum: ["true"]
       security:
         - ManagementKey: []
       responses:
@@ -1236,6 +1850,15 @@ paths:
           description: >-
             The refreshed watch list. Not a 204: the response carries the
             remaining contracts.
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                contracts:
+                  - contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                    start_ledger: 256000
+                count: 1
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1257,9 +1880,42 @@ paths:
       tags: [Operations]
       security:
         - ManagementKey: []
+      parameters:
+        - name: contract_id
+          in: query
+          description: >-
+            Only list dead letters recorded for this contract. Matched
+            exactly, and not validated as a strkey — a dead letter can be
+            recorded for input the decoder could not make sense of.
+          schema:
+            type: string
+          example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Success
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of dead-letter rows matching the request's
+                contract filter, ignoring pagination. Omitted when the count
+                could not be computed; the page itself is still returned.
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                dead_letters:
+                  - id: 42
+                    contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                    ledger: 256000
+                    error: "unexpected end of JSON input"
+                    created_at: "2026-07-21T12:00:00Z"
+                count: 1
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1281,9 +1937,12 @@ paths:
         - name: id
           in: path
           required: true
-          description: Dead-letter row ID
+          description: The dead-letter row to discard.
           schema:
             type: integer
+            format: int64
+            minimum: 1
+          example: 42
       security:
         - ManagementKey: []
       responses:
@@ -1313,6 +1972,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Stats"
+              example:
+                total_events: 12345
+                last_ingested_ledger: 256050
+                verified_through_ledger: 256000
+                contract_count: 3
+                watched_contracts: 1
+                auditor: null
         "401":
           $ref: "#/components/responses/Unauthorized"
         "429":
@@ -1366,6 +2032,13 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/CreateSubscriptionRequest"
+            example:
+              url: "https://example.com/webhook"
+              secret: "whsec_z8eP5qL3vR2xK9yB4w"
+              filters:
+                contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                type: contract
+              enabled: true
       responses:
         "201":
           description: Subscription created
@@ -1373,6 +2046,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Subscription"
+              example:
+                id: 1
+                url: "https://example.com/webhook"
+                filters:
+                  contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                  type: contract
+                secret: "whsec_z8eP5qL3vR2xK9yB4w"
+                enabled: true
+                failure_count: 0
+                created_at: "2026-07-21T12:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1388,12 +2071,29 @@ paths:
       responses:
         "200":
           description: All registered subscriptions
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of subscriptions visible to the caller,
+                which is the full list since this endpoint is not paginated.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: "#/components/schemas/Subscription"
+              example:
+                - id: 1
+                  url: "https://example.com/webhook"
+                  filters:
+                    contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                  secret: "whsec_z8eP5qL3vR2xK9yB4w"
+                  enabled: true
+                  failure_count: 0
+                  created_at: "2026-07-21T12:00:00Z"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "429":
@@ -1409,10 +2109,12 @@ paths:
         - name: id
           in: path
           required: true
-          description: Subscription ID
+          description: Subscription ID, as returned by POST /subscriptions.
           schema:
             type: integer
+            format: int64
             minimum: 1
+          example: 1
       responses:
         "200":
           description: The requested subscription
@@ -1420,6 +2122,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Subscription"
+              example:
+                id: 1
+                url: "https://example.com/webhook"
+                filters:
+                  contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                secret: "whsec_z8eP5qL3vR2xK9yB4w"
+                enabled: true
+                failure_count: 0
+                created_at: "2026-07-21T12:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1439,16 +2150,21 @@ paths:
         - name: id
           in: path
           required: true
-          description: Subscription ID
+          description: Subscription ID, as returned by POST /subscriptions.
           schema:
             type: integer
+            format: int64
             minimum: 1
+          example: 1
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/UpdateSubscriptionRequest"
+            example:
+              url: "https://new.example.com/webhook"
+              enabled: true
       responses:
         "200":
           description: The updated subscription
@@ -1456,6 +2172,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Subscription"
+              example:
+                id: 1
+                url: "https://new.example.com/webhook"
+                filters:
+                  contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                secret: "whsec_z8eP5qL3vR2xK9yB4w"
+                enabled: true
+                failure_count: 0
+                created_at: "2026-07-21T12:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1474,10 +2199,12 @@ paths:
         - name: id
           in: path
           required: true
-          description: Subscription ID
+          description: Subscription ID, as returned by POST /subscriptions.
           schema:
             type: integer
+            format: int64
             minimum: 1
+          example: 1
       responses:
         "204":
           description: Deleted successfully
@@ -1500,27 +2227,39 @@ paths:
         - name: id
           in: path
           required: true
-          description: Subscription ID
+          description: Subscription ID, as returned by POST /subscriptions.
           schema:
             type: integer
+            format: int64
             minimum: 1
-        - name: limit
-          in: query
-          description: Maximum number of deliveries to return (1-200, default 50)
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 200
-            default: 50
+          example: 1
+        - $ref: "#/components/parameters/Limit"
       responses:
         "200":
           description: Delivery attempts, newest first
+          headers:
+            X-Total-Count:
+              description: >-
+                The total number of delivery attempts recorded for the
+                subscription, ignoring the limit. Omitted when the count
+                could not be computed; the page itself is still returned.
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: "#/components/schemas/DeliveryAttempt"
+              example:
+                - id: 1
+                  subscription_id: 1
+                  event_id: "0001099511627776-0000000001"
+                  status: delivered
+                  response_code: 200
+                  duration_ms: 142
+                  created_at: "2026-07-21T12:00:00Z"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1536,70 +2275,114 @@ components:
     ContractID:
       name: contract_id
       in: query
-      description: Filter by contract ID (C-prefixed Stellar address)
+      description: |
+        Filter by contract ID. Accepts a single Stellar contract strkey, or
+        several separated by commas, in which case events from any of them
+        match. Every element is validated: one typo rejects the whole
+        request rather than silently narrowing the result to nothing.
+
+        The alphabet is base32 (`A`-`Z` and `2`-`7`), so `0`, `1`, `8` and
+        `9` never appear in a contract ID.
       schema:
         type: string
-        pattern: "^C[A-Z0-9]{55}$"
+        pattern: "^C[A-Z2-7]{55}(,C[A-Z2-7]{55})*$"
       example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
     EventType:
       name: type
       in: query
-      description: Filter by event type
+      description: >-
+        Filter by event type. Accepts several types separated by commas, in
+        which case events of any listed type match. An unrecognised type is
+        rejected rather than ignored.
       schema:
         type: string
-        enum: [contract, system, diagnostic]
+        pattern: "^(contract|system|diagnostic)(,(contract|system|diagnostic))*$"
+      example: "contract,diagnostic"
     Topic:
       name: topic
       in: query
       description: |
         Exact JSON match against any topic position. Cannot be combined with
-        topic0..topic3. A bare word is treated as a JSON string.
+        topic0..topic3 — a request carrying both is rejected, because the
+        two ask different questions and silently preferring one would hide
+        the mistake.
+
+        A value that parses as JSON is used as-is; anything else is treated
+        as a JSON string, so `transfer` and `"transfer"` mean the same
+        thing.
       schema:
         type: string
       example: '{"symbol":"transfer"}'
     Topic0:
       name: topic0
       in: query
-      description: Exact JSON match against topic position 0
+      description: >-
+        Exact JSON match against topic position 0, usually the event name.
+        Same value rules as topic, and likewise cannot be combined with it.
       schema:
         type: string
       example: '{"symbol":"transfer"}'
     Topic1:
       name: topic1
       in: query
-      description: Exact JSON match against topic position 1
+      description: >-
+        Exact JSON match against topic position 1. Same value rules as
+        topic, and likewise cannot be combined with it.
       schema:
         type: string
+      example: '{"address":"GDW6AUTBXTOC7FIKUO5BOO3OGLK4SF7ZPOBLMQHMZDI45J2Z6VXRB5NR"}'
     Topic2:
       name: topic2
       in: query
-      description: Exact JSON match against topic position 2
+      description: >-
+        Exact JSON match against topic position 2. Same value rules as
+        topic, and likewise cannot be combined with it.
       schema:
         type: string
+      example: '{"address":"GBUKOFF6BLZID2WGVUOFQNPJXBAY3HRUYBOG5DXCTNRHOMCVQ4KKXOTQ"}'
     Topic3:
       name: topic3
       in: query
-      description: Exact JSON match against topic position 3
+      description: >-
+        Exact JSON match against topic position 3. Same value rules as
+        topic, and likewise cannot be combined with it.
       schema:
         type: string
+      example: '{"string":"native"}'
     FromLedger:
       name: from_ledger
       in: query
-      description: Inclusive lower ledger bound
+      description: >-
+        Inclusive lower ledger bound. Must be a positive integer; zero is
+        rejected rather than treated as "unbounded", so a miscomputed bound
+        cannot silently widen a query. When to_ledger is also given,
+        from_ledger must not be greater than it.
       schema:
         type: integer
+        format: int64
         minimum: 1
+      example: 256000
     ToLedger:
       name: to_ledger
       in: query
-      description: Inclusive upper ledger bound
+      description: >-
+        Inclusive upper ledger bound. Must be a positive integer; zero is
+        rejected rather than treated as "unbounded". When from_ledger is
+        also given, it must not be greater than this value.
       schema:
         type: integer
+        format: int64
         minimum: 1
+      example: 256999
     FromTime:
       name: from_time
       in: query
-      description: Inclusive lower created_at bound (RFC 3339). Sub-second precision and missing timezone are rejected.
+      description: >-
+        Inclusive lower created_at bound, as an RFC 3339 timestamp with a
+        timezone and whole-second precision. Sub-second precision is
+        rejected rather than truncated, because a truncated bound would
+        quietly include or exclude a boundary event. When to_time is also
+        given, from_time must not be after it.
       schema:
         type: string
         format: date-time
@@ -1607,7 +2390,11 @@ components:
     ToTime:
       name: to_time
       in: query
-      description: Inclusive upper created_at bound (RFC 3339). Sub-second precision and missing timezone are rejected.
+      description: >-
+        Inclusive upper created_at bound, as an RFC 3339 timestamp with a
+        timezone and whole-second precision. Sub-second precision is
+        rejected rather than truncated. When from_time is also given, it
+        must not be after this value.
       schema:
         type: string
         format: date-time
@@ -1615,31 +2402,80 @@ components:
     Limit:
       name: limit
       in: query
-      description: Page size
+      description: |
+        Page size. Out-of-range values are rejected rather than clamped, so
+        a caller asking for more than it may have finds out instead of
+        silently receiving a short page and assuming it reached the end.
+
+        The ceiling is 500. An operator can lower it with the API_MAX_LIMIT
+        environment variable, so a deployment may reject a value this schema
+        permits; the store never returns more than 500 rows in one page
+        regardless.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 50
+      example: 100
+    ContractsLimit:
+      name: limit
+      in: query
+      description: >-
+        Page size for the contract listing. Bounded tighter than the event
+        endpoints, and by a compile-time constant rather than API_MAX_LIMIT,
+        because the listing is a grouped scan over the events table — one
+        row of output costs far more than one event does.
       schema:
         type: integer
         minimum: 1
         maximum: 200
         default: 50
+      example: 100
     Cursor:
       name: cursor
       in: query
-      description: Opaque pagination cursor from a previous response
+      description: |
+        Opaque pagination cursor. Pass back the cursor a previous response
+        returned, unchanged; clients must not construct, parse or modify
+        one, and its encoding is not part of this API's contract.
+
+        A cursor is only meaningful for the ordering that produced it.
+        Replaying one against a different order_by is rejected rather than
+        silently restarting the walk. The absence of a cursor in a response
+        means that page was the last one.
       schema:
         type: string
-      example: "0001099511627776-0000000001"
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._:-]+$"
     Order:
       name: order
       in: query
-      description: Sort direction
+      description: >-
+        Sort direction for the order_by key. Cannot be combined with the
+        recent shorthand, which pins the direction itself.
       schema:
         type: string
         enum: [asc, desc]
         default: asc
+    OrderBy:
+      name: order_by
+      in: query
+      description: >-
+        Sort key. Whichever key is chosen also decides which cursors are
+        valid for the walk, so changing it mid-pagination means starting
+        over. Cannot be combined with the recent shorthand.
+      schema:
+        type: string
+        enum: [id, ledger, created_at]
+        default: id
     Decoded:
       name: decoded
       in: query
-      description: When true, enrich events with spec-driven named fields
+      description: >-
+        When "true", enrich events with spec-driven named fields. Any other
+        value leaves the response undecoded; only the exact string "true"
+        turns enrichment on. Enrichment is skipped silently when no contract
+        spec is available, so a decoded request is never an error.
       schema:
         type: string
         enum: ["true"]

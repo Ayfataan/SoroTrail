@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -31,13 +32,21 @@ type Config struct {
 	RPCURLS []string `env:"RPC_URLS"`
 	// RPCRateLimitRPS caps each provider's request rate (requests/second)
 	// when the failover client is in use. Only read by the failover client.
-	RPCRateLimitRPS       float64       `env:"RPC_RATE_LIMIT_RPS" envDefault:"10"`
+	RPCRateLimitRPS float64 `env:"RPC_RATE_LIMIT_RPS" envDefault:"10"`
+	// RPCRateLimit caps the single-provider client's request rate in
+	// requests/second (RPC_RATE_LIMIT). The default of 10 matches the
+	// public endpoint limit; raise it only against paid plans or
+	// self-hosted RPCs whose allowance actually permits it. Ignored while
+	// RPC_URLS is set (the failover path uses RPC_RATE_LIMIT_RPS).
+	RPCRateLimit          float64       `env:"RPC_RATE_LIMIT" envDefault:"10"`
 	DatabaseURL           string        `env:"DATABASE_URL"`
 	PollInterval          time.Duration `env:"POLL_INTERVAL" envDefault:"5s"`
 	HTTPAddr              string        `env:"HTTP_ADDR" envDefault:":8080"`
 	WatchedContracts      []string      `env:"WATCHED_CONTRACTS"`
 	StartLedger           uint32        `env:"START_LEDGER"`
 	RetentionLedgers      uint32        `env:"RETENTION_LEDGERS" envDefault:"17280"`
+	IngestPageSize        uint          `env:"INGEST_PAGE_SIZE" envDefault:"1000"`
+	IngestBatchSize       uint          `env:"INGEST_BATCH_SIZE" envDefault:"1000"`
 	PartitionLedgerSpan   uint32        `env:"PARTITION_LEDGER_SPAN" envDefault:"120960"`
 	LogLevel              string        `env:"LOG_LEVEL" envDefault:"info"`
 	LogFormat             string        `env:"LOG_FORMAT" envDefault:"text"`
@@ -127,6 +136,12 @@ type Config struct {
 	// safety net. Default 500 (up from the previous hardcoded 200).
 	APIMaxLimit int `env:"API_MAX_LIMIT" envDefault:"500"`
 
+	// StatsCacheTTL is how long GET /stats results are served from the
+	// per-scope cache before being recomputed, short-circuiting the
+	// expensive aggregation on busy endpoints. Zero disables caching.
+	// Default 5s keeps a dial board roughly in pace with ingestion.
+	StatsCacheTTL time.Duration `env:"STATS_CACHE_TTL" envDefault:"5s"`
+
 	// CachePrivate flips the cacheable endpoints from Cache-Control: public
 	// to Cache-Control: private. Set this when the deployment serves
 	// per-user data behind an auth layer (#17, not yet merged) so shared
@@ -185,6 +200,23 @@ type Config struct {
 	// disables the cap — identical to the pre-cap behavior.
 	MaxEventsPerCycle uint `env:"MAX_EVENTS_PER_CYCLE"`
 
+	// Event write batching and backpressure. BATCH_SIZE caps the number of
+	// events in each store write (UpsertEvents), splitting a fetched page
+	// into smaller chunks so high-volume chains don't land one giant batch
+	// on the DB at once. Zero (the default) keeps the historical single-
+	// write-per-page behavior bit-for-bit.
+	//
+	// When BATCH_SIZE is set AND BATCH_TARGET_LATENCY is set, the page's
+	// chunk size becomes adaptive: writes measured over the latency budget
+	// cause the chunk size to shrink and a backpressure sleep
+	// (BATCH_MAX_BACKOFF) to be inserted between writes, so a strapped
+	// database gets room to drain rather than being hammered at peak.
+	// BATCH_TARGET_LATENCY zero (the default) means the chunk size is
+	// fixed at BATCH_SIZE and no backpressure is applied.
+	BatchSize          uint          `env:"BATCH_SIZE"`
+	BatchTargetLatency time.Duration `env:"BATCH_TARGET_LATENCY"`
+	BatchMaxBackoff    time.Duration `env:"BATCH_MAX_BACKOFF" envDefault:"1s"`
+
 	// ReorgConfirmationWindow is the number of ledgers behind the ingest
 	// frontier that get re-scanned on a periodic basis to detect and
 	// repair RPC-side reorgs. Once a ledger is more than this many ledgers
@@ -230,6 +262,12 @@ type Config struct {
 	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS" envDefault:""`
 	CORSAllowedMethods []string `env:"CORS_ALLOWED_METHODS" envDefault:"GET,POST,PUT,DELETE,OPTIONS"`
 	CORSAllowedHeaders []string `env:"CORS_ALLOWED_HEADERS" envDefault:"Content-Type,X-API-Key,Accept"`
+	// CORSExposedHeaders is returned as Access-Control-Expose-Headers on
+	// responses to allowed origins so browser JavaScript can read those
+	// response headers. X-Request-ID is set on every response by the API's
+	// request logger (#29), so it is the default; an operator can extend
+	// the list or empty it to suppress the header entirely.
+	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID"`
 }
 
 // Load reads configuration from the environment and validates it.
@@ -274,6 +312,19 @@ func ParseLogLevel(raw string) slog.Level {
 		return slog.LevelError
 	default:
 		return slog.LevelInfo
+	}
+}
+
+// NewLogHandler returns the slog.Handler selected by a LOG_FORMAT value,
+// writing to w with the given options. "json" selects the JSON handler;
+// everything else — including unknown or empty values — falls back to the
+// text handler rather than failing startup (mirrors ParseLogLevel).
+func NewLogHandler(w io.Writer, format string, opts *slog.HandlerOptions) slog.Handler {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "json":
+		return slog.NewJSONHandler(w, opts)
+	default:
+		return slog.NewTextHandler(w, opts)
 	}
 }
 
@@ -365,8 +416,17 @@ func (c Config) Validate() error {
 	if c.RPCRateLimitRPS <= 0 {
 		return fmt.Errorf("RPC_RATE_LIMIT_RPS must be positive")
 	}
+	if c.RPCRateLimit <= 0 {
+		return fmt.Errorf("RPC_RATE_LIMIT must be positive, got %v", c.RPCRateLimit)
+	}
 	if c.RetentionBatchSize <= 0 {
 		return fmt.Errorf("RETENTION_BATCH_SIZE must be positive")
+	}
+	if c.IngestPageSize == 0 {
+		return fmt.Errorf("INGEST_PAGE_SIZE must be positive")
+	}
+	if c.IngestBatchSize == 0 {
+		return fmt.Errorf("INGEST_BATCH_SIZE must be positive")
 	}
 	if c.RetentionPause < 0 {
 		return fmt.Errorf("RETENTION_PAUSE must be non-negative")
@@ -418,6 +478,17 @@ func (c Config) Validate() error {
 	}
 	// MAX_EVENTS_PER_CYCLE needs no explicit rule: the env parser rejects
 	// negatives (uint), and zero is the documented "disabled" value.
+	// BATCH_TARGET_LATENCY and BATCH_MAX_BACKOFF tune the batching
+	// behavior that only exists when BATCH_SIZE is set, but tolerating
+	// them when batching is off (a config that sets a budget but forgets
+	// the size) is safer than rejecting it — the operator sees a warning
+	// at startup rather than a crash loop only during a deploy review.
+	if c.BatchSize > 0 && c.BatchTargetLatency < 0 {
+		return fmt.Errorf("BATCH_TARGET_LATENCY must be non-negative, got %s", c.BatchTargetLatency)
+	}
+	if c.BatchMaxBackoff < 0 {
+		return fmt.Errorf("BATCH_MAX_BACKOFF must be non-negative, got %s", c.BatchMaxBackoff)
+	}
 	if c.ReorgConfirmationWindow > 0 && c.ReorgRescanInterval <= 0 {
 		return fmt.Errorf("REORG_RESCAN_INTERVAL must be positive when REORG_CONFIRMATION_WINDOW is set")
 	}
@@ -573,6 +644,7 @@ func (c Config) LoggableFields() []any {
 		"rpc_base_backoff", c.RPCBaseBackoff,
 		"rpc_max_backoff", c.RPCMaxBackoff,
 		"rpc_jitter", c.RPCJitter,
+		"rpc_rate_limit", c.RPCRateLimit,
 		"database_url", dbURL,
 		"poll_interval", c.PollInterval,
 		"http_addr", c.HTTPAddr,
@@ -587,6 +659,9 @@ func (c Config) LoggableFields() []any {
 		"shutdown_timeout", c.ShutdownTimeout,
 		"sweep_concurrency", c.SweepConcurrency,
 		"max_events_per_cycle", c.MaxEventsPerCycle,
+		"batch_size", c.BatchSize,
+		"batch_target_latency", c.BatchTargetLatency,
+		"batch_max_backoff", c.BatchMaxBackoff,
 		"reorg_confirmation_window", c.ReorgConfirmationWindow,
 		"reorg_rescan_interval", c.ReorgRescanInterval,
 		"export_max_range", c.ExportMaxRange,

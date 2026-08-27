@@ -1734,6 +1734,27 @@ func (p *Postgres) ListDeadLetters(ctx context.Context, contractID string, limit
 	return rows, next, nil
 }
 
+// CountDeadLetters returns the total number of dead-letter rows matching
+// the same contract filter as ListDeadLetters ("" means all contracts).
+// Pagination is deliberately ignored: the count is the full match set
+// behind any page, so a client can show a total without walking pages.
+func (p *Postgres) CountDeadLetters(ctx context.Context, contractID string) (int64, error) {
+	var total int64
+	err := p.withStatementTimeoutTx(ctx, func(tx pgx.Tx) error {
+		if contractID != "" {
+			return tx.QueryRow(ctx,
+				`SELECT count(*) FROM dead_letters WHERE contract_id = $1`,
+				contractID,
+			).Scan(&total)
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM dead_letters`).Scan(&total)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("counting dead letters: %w", err)
+	}
+	return total, nil
+}
+
 func (p *Postgres) GetDeadLetter(ctx context.Context, id int64) (DeadLetter, error) {
 	var d DeadLetter
 	var txHash *string

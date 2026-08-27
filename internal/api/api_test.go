@@ -27,6 +27,63 @@ import (
 	"github.com/sorotrail/sorotrail/internal/store"
 )
 
+func TestWrapEnvelope(t *testing.T) {
+	tests := []struct {
+		name            string
+		data            any
+		cursor          string
+		wantData        any
+		wantCursor      string
+		wantCursorValue bool
+	}{
+		{
+			name:       "populated slice",
+			data:       []string{"one", "two"},
+			wantData:   []any{"one", "two"},
+			wantCursor: "",
+		},
+		{
+			name:     "nil typed slice",
+			data:     []string(nil),
+			wantData: []any{},
+		},
+		{
+			name:     "empty non-nil slice",
+			data:     []string{},
+			wantData: []any{},
+		},
+		{
+			name:            "non-empty cursor",
+			data:            []string{"one"},
+			cursor:          "next-page",
+			wantData:        []any{"one"},
+			wantCursor:      "next-page",
+			wantCursorValue: true,
+		},
+		{
+			name:     "empty cursor omitted",
+			data:     []string{"one"},
+			wantData: []any{"one"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(wrapEnvelope(tt.data, tt.cursor))
+			require.NoError(t, err)
+
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(body, &got))
+			assert.Equal(t, tt.wantData, got["data"])
+			if tt.wantCursorValue {
+				assert.Equal(t, tt.wantCursor, got["next_cursor"])
+			} else {
+				assert.NotContains(t, got, "next_cursor")
+			}
+		})
+	}
+}
+
 // stubStore implements store.Store for API tests.
 type stubStore struct {
 	mu        sync.Mutex
@@ -60,6 +117,7 @@ type stubStore struct {
 	lastExcludeID string
 
 	stats            store.Stats
+	statsCalls       int // number of Stats calls (to observe caching)
 	pingErr          error
 	watchedList      []store.WatchedContract
 	watchedListErr   error
@@ -96,6 +154,17 @@ type stubStore struct {
 	deadLettersResult []store.DeadLetter
 	deadLettersCursor string
 	deadLettersErr    error
+	// deadLettersCount is what CountDeadLetters returns; the error field
+	// drives the "count failed, header omitted" path.
+	deadLettersCount    int64
+	deadLettersCountErr error
+
+	// deliveryAttemptsCount is what CountDeliveryAttempts returns; the
+	// error field drives the "count failed, header omitted" path.
+	deliveryAttemptsCount    int64
+	deliveryAttemptsCountErr error
+
+	subscriptions []store.Subscription
 
 	contractCursors map[string]store.ContractCursor
 }
@@ -228,8 +297,13 @@ func (s *stubStore) MigrationVersion(context.Context) (int, bool, error) {
 	return v, s.migrationDirty, nil
 }
 
-func (s *stubStore) Stats(context.Context, store.Scope) (store.Stats, error) { return s.stats, nil }
-func (s *stubStore) Ping(context.Context) error                              { return s.pingErr }
+func (s *stubStore) Stats(_ context.Context, _ store.Scope) (store.Stats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statsCalls++
+	return s.stats, nil
+}
+func (s *stubStore) Ping(context.Context) error { return s.pingErr }
 func (s *stubStore) ListWatchedContracts(context.Context) ([]store.WatchedContract, error) {
 	return s.watchedList, s.watchedListErr
 }
@@ -264,7 +338,7 @@ func (s *stubStore) GetSubscription(_ context.Context, id int64, _ store.Subscri
 	return store.Subscription{}, store.ErrNotFound
 }
 func (s *stubStore) ListSubscriptions(context.Context, store.SubscriptionOwner) ([]store.Subscription, error) {
-	return nil, nil
+	return s.subscriptions, nil
 }
 func (s *stubStore) UpdateSubscription(_ context.Context, sub store.Subscription, _ store.SubscriptionOwner) (store.Subscription, error) {
 	return sub, nil
@@ -1470,6 +1544,69 @@ func TestStats(t *testing.T) {
 	})
 }
 
+// TestStats_Cache verifies the /stats TTL cache end-to-end: repeated calls
+// within the window hit the cache (the store is consulted once), and the value
+// refreshes after the TTL expires.
+func TestStats_Cache(t *testing.T) {
+	t.Run("repeated calls within TTL hit the cache", func(t *testing.T) {
+		st := &stubStore{stats: store.Stats{TotalEvents: 42, LastIngestedLedger: 999}}
+		s := newTestServer(st, nil)
+		s.SetStatsTTL(30 * time.Second)
+
+		resp1, body1 := doGet(t, s, "/stats")
+		require.Equal(t, http.StatusOK, resp1.StatusCode, string(body1))
+		resp2, body2 := doGet(t, s, "/stats")
+		require.Equal(t, http.StatusOK, resp2.StatusCode, string(body2))
+
+		require.Equal(t, 1, st.statsCalls,
+			"both requests inside the TTL must be served from cache, so the store is hit once")
+		assert.Equal(t, string(body1), string(body2), "cached responses must be identical")
+		var got store.Stats
+		require.NoError(t, json.Unmarshal(body2, &got))
+		assert.Equal(t, int64(42), got.TotalEvents)
+	})
+
+	t.Run("values refresh after expiry", func(t *testing.T) {
+		st := &stubStore{stats: store.Stats{TotalEvents: 42, LastIngestedLedger: 999}}
+		s := newTestServer(st, nil)
+		s.SetStatsTTL(30 * time.Millisecond)
+
+		_, _ = doGet(t, s, "/stats")
+		_, _ = doGet(t, s, "/stats")
+		require.Equal(t, 1, st.statsCalls, "first two calls within TTL cache")
+
+		// Let the TTL elapse, then the next call must recompute.
+		time.Sleep(50 * time.Millisecond)
+		_, body := doGet(t, s, "/stats")
+		require.Equal(t, 2, st.statsCalls, "after expiry the store is consulted again")
+
+		var got store.Stats
+		require.NoError(t, json.Unmarshal(body, &got))
+		assert.Equal(t, int64(42), got.TotalEvents, "refreshed value is present")
+	})
+
+	t.Run("zero TTL disables caching", func(t *testing.T) {
+		st := &stubStore{stats: store.Stats{TotalEvents: 1}}
+		s := newTestServer(st, nil) // default TTL 0 disables caching
+
+		_, _ = doGet(t, s, "/stats")
+		_, _ = doGet(t, s, "/stats")
+		require.Equal(t, 2, st.statsCalls, "without a configured TTL every request recomputes")
+	})
+
+	t.Run("no-store header retained on cached hits", func(t *testing.T) {
+		st := &stubStore{stats: store.Stats{TotalEvents: 1}}
+		s := newTestServer(st, nil)
+		s.SetStatsTTL(30 * time.Second)
+
+		resp1, _ := doGet(t, s, "/stats")
+		resp2, _ := doGet(t, s, "/stats")
+		require.Equal(t, http.StatusOK, resp1.StatusCode)
+		require.Equal(t, "no-store", resp1.Header.Get("Cache-Control"))
+		require.Equal(t, "no-store", resp2.Header.Get("Cache-Control"), "cached /stats must stay no-store")
+	})
+}
+
 func TestListEvents_StreamNDJSON(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1809,6 +1946,95 @@ func TestEnvelope(t *testing.T) {
 		require.NoError(t, json.Unmarshal(body, &out))
 		assert.NotNil(t, out.Data)
 		assert.Empty(t, out.NextCursor)
+	})
+}
+
+// TestListEndpoints_TotalCountHeader covers the X-Total-Count contract on
+// every list endpoint that reports it: the header carries the unpaginated
+// total, and a failed count (or a page whose length is the total) never
+// fails the request.
+func TestListEndpoints_TotalCountHeader(t *testing.T) {
+	t.Run("dead-letters sets X-Total-Count when the count succeeds", func(t *testing.T) {
+		st := &stubStore{
+			deadLettersResult: []store.DeadLetter{{ID: 1}},
+			deadLettersCursor: "dl-cursor",
+			deadLettersCount:  7,
+		}
+		resp, _ := doGetWithAuth(t, newTestServer(st, nil), "/dead-letters?contract_id="+testContract, "test-key")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "7", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("dead-letters omits X-Total-Count when the count fails", func(t *testing.T) {
+		st := &stubStore{
+			deadLettersResult:   []store.DeadLetter{{ID: 1}},
+			deadLettersCountErr: errors.New("count timeout"),
+		}
+		resp, _ := doGetWithAuth(t, newTestServer(st, nil), "/dead-letters", "test-key")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("subscriptions reports the owner-scoped total", func(t *testing.T) {
+		st := &stubStore{subscriptions: []store.Subscription{{ID: 1}, {ID: 2}}}
+		resp, _ := doGet(t, newTestServer(st, nil), "/subscriptions")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "2", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("subscriptions reports zero for an empty list", func(t *testing.T) {
+		resp, _ := doGet(t, newTestServer(&stubStore{}, nil), "/subscriptions")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "0", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("deliveries sets X-Total-Count when the count succeeds", func(t *testing.T) {
+		st := newSubErrorStub()
+		st.deliveryAttemptsCount = 12
+		resp, _ := doAPIRequest(t, newServerFromStub(st), http.MethodGet, "/subscriptions/1/deliveries", "")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "12", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("deliveries omits X-Total-Count when the count fails", func(t *testing.T) {
+		st := newSubErrorStub()
+		st.deliveryAttemptsCountErr = errors.New("count timeout")
+		resp, _ := doAPIRequest(t, newServerFromStub(st), http.MethodGet, "/subscriptions/1/deliveries", "")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("watched-contracts reports the list length", func(t *testing.T) {
+		st := &stubStore{watchedList: []store.WatchedContract{
+			{ContractID: testContract},
+			{ContractID: "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"},
+		}}
+		resp, _ := doGetWithAuth(t, newTestServer(st, nil), "/watched-contracts", "test-key")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "2", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("contracts reports zero for an empty result set", func(t *testing.T) {
+		// An absent header would be ambiguous ("not counted" vs "zero"),
+		// so an empty page must still carry X-Total-Count: 0.
+		st := &stubStore{countContractsResult: 0}
+		resp, _ := doGet(t, newTestServer(st, nil), "/contracts")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "0", resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("contracts omits X-Total-Count when the count fails", func(t *testing.T) {
+		st := &stubStore{countContractsErr: errors.New("count timeout")}
+		resp, _ := doGet(t, newTestServer(st, nil), "/contracts")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Empty(t, resp.Header.Get("X-Total-Count"))
+	})
+
+	t.Run("address events sets X-Total-Count from the store count", func(t *testing.T) {
+		st := &stubStore{addressEvents: []store.Event{{ID: "e1"}}, addressCount: 3}
+		resp, _ := doGet(t, newTestServer(st, nil), "/addresses/"+testAddress+"/events")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "3", resp.Header.Get("X-Total-Count"))
 	})
 }
 
@@ -2643,3 +2869,9 @@ func (m *stubStore) GetDeadLetter(context.Context, int64) (store.DeadLetter, err
 	return store.DeadLetter{}, store.ErrNotFound
 }
 func (m *stubStore) DeleteDeadLetter(context.Context, int64) error { return nil }
+func (m *stubStore) CountDeadLetters(context.Context, string) (int64, error) {
+	return m.deadLettersCount, m.deadLettersCountErr
+}
+func (m *stubStore) CountDeliveryAttempts(context.Context, int64, store.SubscriptionOwner) (int64, error) {
+	return m.deliveryAttemptsCount, m.deliveryAttemptsCountErr
+}
