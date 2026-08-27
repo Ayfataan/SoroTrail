@@ -275,3 +275,7 @@ func TestDerefInt64(t *testing.T) {
 		})
 	}
 }
+
+func (s *stubStore) CountEventsBefore(context.Context, int64, time.Time, int) (int64, error) {
+	return 0, nil
+}

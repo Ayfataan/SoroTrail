@@ -2747,6 +2747,20 @@ func TestListEvents_ConfigurableMaxLimit(t *testing.T) {
 	}
 }
 
+// The API's default page cap must stay aligned with the store's hard
+// clamp: both default to 500, and raising API_MAX_LIMIT above
+// store.MaxQueryLimit would let the API accept a limit the store then
+// silently clamps, so a caller would get a short page with no error.
+// See the comments on store.MaxQueryLimit and maxLimit in server.go.
+func TestMaxLimitAlignsWithStoreClamp(t *testing.T) {
+	SetMaxLimit(500) // restore the default; other tests may have changed it
+	t.Cleanup(func() { SetMaxLimit(500) })
+
+	assert.Equal(t, store.MaxQueryLimit, maxLimit,
+		"API default maxLimit and store.MaxQueryLimit must stay in lockstep; "+
+			"an API_MAX_LIMIT above store.MaxQueryLimit is silently clamped by the store")
+}
+
 func TestGetEventTransaction_Success(t *testing.T) {
 	st := &stubStore{
 		event: store.Event{ID: "0001-0001", TxHash: "abc123"},
@@ -2874,4 +2888,8 @@ func (m *stubStore) CountDeadLetters(context.Context, string) (int64, error) {
 }
 func (m *stubStore) CountDeliveryAttempts(context.Context, int64, store.SubscriptionOwner) (int64, error) {
 	return m.deliveryAttemptsCount, m.deliveryAttemptsCountErr
+}
+
+func (s *stubStore) CountEventsBefore(context.Context, int64, time.Time, int) (int64, error) {
+	return 0, nil
 }
