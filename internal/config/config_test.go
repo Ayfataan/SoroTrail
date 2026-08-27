@@ -1,7 +1,12 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -1119,6 +1124,56 @@ func TestLoad(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewLogHandler(t *testing.T) {
+	tests := []struct {
+		name     string
+		format   string
+		wantJSON bool
+	}{
+		{name: "json selects the JSON handler", format: "json", wantJSON: true},
+		{name: "JSON is accepted case-insensitively", format: "JSON", wantJSON: true},
+		{name: "surrounding whitespace is trimmed", format: " json ", wantJSON: true},
+		{name: "text selects the text handler", format: "text"},
+		{name: "TEXT is accepted case-insensitively", format: "TEXT"},
+		{name: "empty format falls back to text", format: ""},
+		{name: "unknown format falls back to text", format: "xml"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewLogHandler(io.Discard, tt.format, nil)
+			_, isJSON := h.(*slog.JSONHandler)
+			_, isText := h.(*slog.TextHandler)
+			if tt.wantJSON {
+				assert.True(t, isJSON, "expected a *slog.JSONHandler for format %q", tt.format)
+				assert.False(t, isText, "expected no *slog.TextHandler for format %q", tt.format)
+			} else {
+				assert.True(t, isText, "expected a *slog.TextHandler for format %q", tt.format)
+				assert.False(t, isJSON, "expected no *slog.JSONHandler for format %q", tt.format)
+			}
+		})
+	}
+}
+
+func TestNewLogHandlerHonorsOptions(t *testing.T) {
+	var buf bytes.Buffer
+	h := NewLogHandler(&buf, "json", &slog.HandlerOptions{Level: slog.LevelWarn})
+	logger := slog.New(h)
+	logger.Info("dropped")
+	logger.Warn("kept")
+
+	var lines []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &parsed))
+		lines = append(lines, parsed)
+	}
+	require.Len(t, lines, 1, "level filter must be honored by the selected handler")
+	assert.Equal(t, "kept", lines[0]["msg"])
 }
 
 func TestValidOrigin(t *testing.T) {
