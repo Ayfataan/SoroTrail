@@ -75,6 +75,9 @@ type Options struct {
 	RetentionLedgers uint32
 	// PageLimit is the getEvents pagination limit per request. Default 1000.
 	PageLimit uint
+	// WriteBatchSize is the maximum number of events written in one store
+	// operation. Default 1000.
+	WriteBatchSize uint
 	// MaxEventsPerCycle caps the number of events a single runOnce cycle
 	// may process, bounding memory and per-cycle latency on busy chains.
 	// When the cap is hit mid-window the sweep stops issuing further
@@ -192,6 +195,9 @@ func (o *Options) applyDefaults() {
 	if o.PageLimit == 0 {
 		o.PageLimit = 1000
 	}
+	if o.WriteBatchSize == 0 {
+		o.WriteBatchSize = 1000
+	}
 	if o.MaxBackoff <= 0 {
 		o.MaxBackoff = time.Minute
 	}
@@ -264,6 +270,17 @@ type Ingester struct {
 	// a poison event no longer stalls the loop. nil means no
 	// dead-lettering — the cycle aborts on the first error as before.
 	deadLetterStore DeadLetterSink
+}
+
+type networkStateStore interface {
+	GetIngestionStateForNetwork(context.Context, string) (store.IngestionState, error)
+}
+
+func (ing *Ingester) getIngestionState(ctx context.Context) (store.IngestionState, error) {
+	if scoped, ok := ing.store.(networkStateStore); ok {
+		return scoped.GetIngestionStateForNetwork(ctx, ing.opts.Network)
+	}
+	return ing.store.GetIngestionState(ctx)
 }
 
 // New wires an Ingester.
@@ -435,7 +452,7 @@ func (ing *Ingester) Run(ctx context.Context) (err error) {
 // the caller. A no-op return is fine: it means there's not yet enough
 // history to have a finalized window.
 func (ing *Ingester) rescanForReorg(ctx context.Context) error {
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("loading ingestion state for reorg rescan: %w", err)
 	}
@@ -516,6 +533,7 @@ func (ing *Ingester) singlePage(ctx context.Context, startLedger uint32, cursor 
 	if state.LastCursor == "" && state.LastIngestedLedger <= 0 {
 		state.LastIngestedLedger = int64(startLedger) - 1
 	}
+	state.Network = ing.opts.Network
 	if err := ing.store.SaveIngestionState(ctx, state); err != nil {
 		return false, err
 	}
@@ -597,6 +615,7 @@ func (ing *Ingester) reingestBatch(ctx context.Context, client rpc.Client, fromL
 		if err != nil {
 			return 0, err
 		}
+		ev.Network = ing.opts.Network
 		storeEvents = append(storeEvents, ev)
 	}
 	if err := ing.store.ReplaceEventsInRange(ctx, storeEvents, int64(fromLedger), int64(toLedger)); err != nil {
@@ -613,6 +632,10 @@ func (ing *Ingester) BuildFilterBatches(ctx context.Context) ([][]rpc.EventFilte
 
 // PageLimit returns the getEvents pagination cap.
 func (ing *Ingester) PageLimit() uint { return ing.opts.PageLimit }
+
+// WriteBatchSize returns the maximum number of events written in one store
+// operation.
+func (ing *Ingester) WriteBatchSize() uint { return ing.opts.WriteBatchSize }
 
 // MaxEventsPerCycle returns the per-cycle event cap; 0 means disabled.
 func (ing *Ingester) MaxEventsPerCycle() uint { return ing.opts.MaxEventsPerCycle }
@@ -748,7 +771,7 @@ func (ing *Ingester) windowSweep(ctx context.Context, start uint32, batches [][]
 		lastIngested = int64(end) - 1
 	}
 	now := time.Now().UTC()
-	err = ing.store.SaveIngestionState(ctx, store.IngestionState{LastIngestedLedger: lastIngested, LastSuccessfulPoll: &now})
+	err = ing.store.SaveIngestionState(ctx, store.IngestionState{Network: ing.opts.Network, LastIngestedLedger: lastIngested, LastSuccessfulPoll: &now})
 	if err != nil {
 		return false, err
 	}
@@ -892,6 +915,16 @@ func (ing *Ingester) persistEvents(ctx context.Context, rpcEvents []rpc.Event, l
 		}
 		events = append(events, ev)
 	}
+	for start := 0; start < len(events); start += int(ing.opts.WriteBatchSize) {
+		end := min(start+int(ing.opts.WriteBatchSize), len(events))
+		if err := ing.persistEventBatch(ctx, events[start:end], rpcEvents[len(rpcEvents)-1].Ledger, latestLedger); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ing *Ingester) persistEventBatch(ctx context.Context, events []store.Event, throughLedger, latestLedger uint32) error {
 	persistCtx, persistSpan := ing.tracer.Start(ctx, "ingester.persist_events")
 	inserted, err := ing.writeEventsPersist(persistCtx, events)
 	persistSpan.End()
@@ -899,27 +932,18 @@ func (ing *Ingester) persistEvents(ctx context.Context, rpcEvents []rpc.Event, l
 		return err
 	}
 
-	// Extract addresses from decoded event topics/values and persist the
-	// inverted index. Extraction operates on the decoded JSON (not XDR) and
-	// runs after UpsertEvents so a failed address extraction does not lose
-	// events — the events themselves are already committed.
 	if err := ing.indexEventAddresses(ctx, events); err != nil {
-		// Log the error but do not fail the ingest pass: address indexing
-		// is a derived index and can be rebuilt via the index-addresses
-		// backfill command if it falls behind.
 		ing.log.Error("indexing event addresses", "error", err)
 	}
 
 	ing.log.Info("ingested events",
 		"count", len(events), "new", inserted,
-		"through_ledger", rpcEvents[len(rpcEvents)-1].Ledger,
+		"through_ledger", throughLedger,
 		"latest_ledger", latestLedger)
 
 	if ing.bcast != nil {
 		ing.bcast.Publish(ctx, events)
 	}
-	// Notify webhooks (or other listeners) after successful persistence.
-	// This is a fire-and-forget call — it must never block ingestion.
 	if ing.notifier != nil {
 		ing.notifier.NotifyEvents(ctx, events)
 	}
@@ -1101,7 +1125,7 @@ func (bc *batchController) recordAndBackoff(rows int, latency time.Duration) tim
 }
 
 func (ing *Ingester) resolvePosition(ctx context.Context) (startLedger uint32, cursor string, err error) {
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return 0, "", err
 	}
@@ -1138,6 +1162,7 @@ func (ing *Ingester) reclampToOldest(ctx context.Context, requested uint32) erro
 	ing.log.Warn("resume ledger fell outside RPC retention window; skipping ahead — events in the gap are lost",
 		"requested_ledger", requested, "oldest_retained", health.OldestLedger)
 	return ing.store.SaveIngestionState(ctx, store.IngestionState{
+		Network:            ing.opts.Network,
 		LastIngestedLedger: int64(health.OldestLedger) - 1,
 	})
 }
@@ -1151,7 +1176,7 @@ func (ing *Ingester) reclampToOldest(ctx context.Context, requested uint32) erro
 // in that path — it guards against any future change that might persist a
 // cursor mid-sweep.
 func (ing *Ingester) discardCursor(ctx context.Context) {
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil {
 		ing.log.Warn("discardCursor: could not read state", "error", err)
 		return
@@ -1160,6 +1185,7 @@ func (ing *Ingester) discardCursor(ctx context.Context) {
 		return
 	}
 	if err := ing.store.SaveIngestionState(ctx, store.IngestionState{
+		Network:            ing.opts.Network,
 		LastIngestedLedger: state.LastIngestedLedger,
 	}); err != nil {
 		ing.log.Warn("discardCursor: could not save state", "error", err)
@@ -1198,7 +1224,7 @@ func (ing *Ingester) checkLag(ctx context.Context) {
 		// noise without adding information.
 		return
 	}
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Cold start: no baseline yet, but still publish the
