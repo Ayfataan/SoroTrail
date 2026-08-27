@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -70,6 +72,10 @@ type Options struct {
 	PollInterval time.Duration
 	// StartLedger, when non-zero, overrides the cold-start position.
 	StartLedger uint32
+	// StartLedgerRaw holds the raw START_LEDGER value from the
+	// environment so the ingester can parse relative offsets (e.g.
+	// "latest-1000") at runtime when the RPC client is available.
+	StartLedgerRaw string
 	// RetentionLedgers is how far behind the latest ledger a cold start
 	// reaches when StartLedger is unset. Default 17280 (~24h).
 	RetentionLedgers uint32
@@ -1136,22 +1142,61 @@ func (ing *Ingester) resolvePosition(ctx context.Context) (startLedger uint32, c
 		return uint32(state.LastIngestedLedger) + 1, "", nil
 	}
 
-	if ing.opts.StartLedger > 0 {
-		return ing.opts.StartLedger, "", nil
-	}
 	health, err := ing.client.GetHealth(ctx)
 	if err != nil {
 		return 0, "", fmt.Errorf("getHealth for cold start: %w", err)
 	}
-	start := int64(health.LatestLedger) - int64(ing.opts.RetentionLedgers)
-	if oldest := int64(health.OldestLedger); start < oldest {
-		start = oldest
+
+	var resolved uint32
+	if ing.opts.StartLedger > 0 {
+		resolved = ing.opts.StartLedger
+	} else if ing.opts.StartLedgerRaw != "" {
+		resolved, err = resolveStartLedgerRaw(ing.opts.StartLedgerRaw, health)
+		if err != nil {
+			return 0, "", err
+		}
+	} else {
+		start := int64(health.LatestLedger) - int64(ing.opts.RetentionLedgers)
+		if oldest := int64(health.OldestLedger); start < oldest {
+			start = oldest
+		}
+		if start < 2 {
+			start = 2
+		}
+		resolved = uint32(start)
 	}
+
+	if (ing.opts.StartLedger > 0 || ing.opts.StartLedgerRaw != "") &&
+		health.OldestLedger > 0 && resolved < health.OldestLedger {
+		return 0, "", fmt.Errorf(
+			"START_LEDGER %d is below the RPC's oldest retained ledger %d; events in the gap are unrecoverable",
+			resolved, health.OldestLedger)
+	}
+	if resolved < 2 {
+		resolved = 2
+	}
+	ing.log.Info("cold start", "start_ledger", resolved, "latest_ledger", health.LatestLedger)
+	return resolved, "", nil
+}
+
+func resolveStartLedgerRaw(raw string, health rpc.Health) (uint32, error) {
+	raw = strings.TrimSpace(raw)
+	if n, err := strconv.ParseUint(raw, 10, 32); err == nil {
+		return uint32(n), nil
+	}
+	if !strings.HasPrefix(strings.ToLower(raw), "latest-") {
+		return 0, fmt.Errorf("START_LEDGER %q: not an absolute ledger number or relative offset", raw)
+	}
+	offsetStr := raw[len("latest-"):]
+	offset, err := strconv.ParseUint(offsetStr, 10, 32)
+	if err != nil || offset == 0 {
+		return 0, fmt.Errorf("START_LEDGER %q: offset must be a positive integer", raw)
+	}
+	start := int64(health.LatestLedger) - int64(offset)
 	if start < 2 {
 		start = 2
 	}
-	ing.log.Info("cold start", "start_ledger", start, "latest_ledger", health.LatestLedger)
-	return uint32(start), "", nil
+	return uint32(start), nil
 }
 
 func (ing *Ingester) reclampToOldest(ctx context.Context, requested uint32) error {
