@@ -2875,3 +2875,7 @@ func (m *stubStore) CountDeadLetters(context.Context, string) (int64, error) {
 func (m *stubStore) CountDeliveryAttempts(context.Context, int64, store.SubscriptionOwner) (int64, error) {
 	return m.deliveryAttemptsCount, m.deliveryAttemptsCountErr
 }
+
+func (s *stubStore) CountEventsBefore(context.Context, int64, time.Time, int) (int64, error) {
+	return 0, nil
+}
