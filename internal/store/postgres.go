@@ -211,9 +211,9 @@ func (p *Postgres) UpsertEvents(ctx context.Context, events []Event) (int64, err
 // stored via the coalesce() clauses in the UPDATE branch (`sorotrail replay`
 // relies on that).
 func insertEventsBatch(events []Event, onUpdate bool) *pgx.Batch {
-	conflict := `ON CONFLICT (ledger, id) DO NOTHING`
+	conflict := `ON CONFLICT (network, ledger, id) DO NOTHING`
 	if onUpdate {
-		conflict = `ON CONFLICT (ledger, id) DO UPDATE SET
+		conflict = `ON CONFLICT (network, ledger, id) DO UPDATE SET
 			contract_id        = EXCLUDED.contract_id,
 			ledger             = EXCLUDED.ledger,
 			type               = EXCLUDED.type,
@@ -229,10 +229,10 @@ func insertEventsBatch(events []Event, onUpdate bool) *pgx.Batch {
 	}
 	stmt := `
 		INSERT INTO events
-			(id, contract_id, ledger, type, tx_hash, tx_index, op_index,
+			(id, network, contract_id, ledger, type, tx_hash, tx_index, op_index,
 			 in_successful_call, topics, value, created_at,
 			 raw_topic_xdr, raw_value_xdr)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		` + conflict
 	batch := &pgx.Batch{}
 	for _, e := range events {
@@ -240,7 +240,7 @@ func insertEventsBatch(events []Event, onUpdate bool) *pgx.Batch {
 		// into SQL NULL so the column has one representation of "absent"
 		// rather than two.
 		batch.Queue(stmt,
-			e.ID, e.ContractID, e.Ledger, e.Type, e.TxHash, e.TxIndex,
+			e.ID, defaultNetwork(e.Network), e.ContractID, e.Ledger, e.Type, e.TxHash, e.TxIndex,
 			e.OpIndex, e.InSuccessfulCall, e.Topics, e.Value, e.CreatedAt,
 			nullableStringSlice(e.RawTopicXDR), nullableText(e.RawValueXDR),
 		)
@@ -782,6 +782,9 @@ func buildEventWhereClause(f EventFilter) ([]string, []any) {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
 	}
+	if f.Network != "" {
+		where = append(where, "network = "+arg(defaultNetwork(f.Network)))
+	}
 	// Scope is appended first so it is present in every generated
 	// statement, including ones where a later filter returns early. It is
 	// ANDed with the caller's filters, never ORed, so widening the request
@@ -1070,11 +1073,16 @@ func (p *Postgres) CountEvents(ctx context.Context, f EventFilter) (int64, error
 }
 
 func (p *Postgres) GetIngestionState(ctx context.Context) (IngestionState, error) {
+	return p.GetIngestionStateForNetwork(ctx, "default")
+}
+
+func (p *Postgres) GetIngestionStateForNetwork(ctx context.Context, network string) (IngestionState, error) {
 	var s IngestionState
+	network = defaultNetwork(network)
 	err := p.withStatementTimeoutTx(ctx, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT last_ingested_ledger, last_cursor, last_successful_poll, updated_at FROM ingestion_state WHERE id = 1`,
-		).Scan(&s.LastIngestedLedger, &s.LastCursor, &s.LastSuccessfulPoll, &s.UpdatedAt)
+			`SELECT network, last_ingested_ledger, last_cursor, last_successful_poll, updated_at FROM ingestion_state WHERE network = $1`, network,
+		).Scan(&s.Network, &s.LastIngestedLedger, &s.LastCursor, &s.LastSuccessfulPoll, &s.UpdatedAt)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return IngestionState{}, ErrNotFound
@@ -1090,14 +1098,14 @@ func (p *Postgres) SaveIngestionState(ctx context.Context, s IngestionState) err
 		s.Network = "default"
 	}
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO ingestion_state (id, last_ingested_ledger, last_cursor, last_successful_poll, updated_at)
-		VALUES (1, $1, $2, $3, now())
-		ON CONFLICT (id) DO UPDATE SET
+		INSERT INTO ingestion_state (network, last_ingested_ledger, last_cursor, last_successful_poll, updated_at)
+		VALUES ($1, $2, $3, $4, now())
+		ON CONFLICT (network) DO UPDATE SET
 			last_ingested_ledger = EXCLUDED.last_ingested_ledger,
 			last_cursor          = EXCLUDED.last_cursor,
 			last_successful_poll = EXCLUDED.last_successful_poll,
 			updated_at           = now()`,
-		s.LastIngestedLedger, s.LastCursor, s.LastSuccessfulPoll,
+		s.Network, s.LastIngestedLedger, s.LastCursor, s.LastSuccessfulPoll,
 	)
 	if err != nil {
 		return fmt.Errorf("saving ingestion state for network %q: %w", s.Network, err)

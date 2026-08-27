@@ -272,6 +272,17 @@ type Ingester struct {
 	deadLetterStore DeadLetterSink
 }
 
+type networkStateStore interface {
+	GetIngestionStateForNetwork(context.Context, string) (store.IngestionState, error)
+}
+
+func (ing *Ingester) getIngestionState(ctx context.Context) (store.IngestionState, error) {
+	if scoped, ok := ing.store.(networkStateStore); ok {
+		return scoped.GetIngestionStateForNetwork(ctx, ing.opts.Network)
+	}
+	return ing.store.GetIngestionState(ctx)
+}
+
 // New wires an Ingester.
 func New(client rpc.Client, st store.Store, dec decode.Decoder, log *slog.Logger, opts Options) *Ingester {
 	opts.applyDefaults()
@@ -441,7 +452,7 @@ func (ing *Ingester) Run(ctx context.Context) (err error) {
 // the caller. A no-op return is fine: it means there's not yet enough
 // history to have a finalized window.
 func (ing *Ingester) rescanForReorg(ctx context.Context) error {
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("loading ingestion state for reorg rescan: %w", err)
 	}
@@ -522,6 +533,7 @@ func (ing *Ingester) singlePage(ctx context.Context, startLedger uint32, cursor 
 	if state.LastCursor == "" && state.LastIngestedLedger <= 0 {
 		state.LastIngestedLedger = int64(startLedger) - 1
 	}
+	state.Network = ing.opts.Network
 	if err := ing.store.SaveIngestionState(ctx, state); err != nil {
 		return false, err
 	}
@@ -603,6 +615,7 @@ func (ing *Ingester) reingestBatch(ctx context.Context, client rpc.Client, fromL
 		if err != nil {
 			return 0, err
 		}
+		ev.Network = ing.opts.Network
 		storeEvents = append(storeEvents, ev)
 	}
 	if err := ing.store.ReplaceEventsInRange(ctx, storeEvents, int64(fromLedger), int64(toLedger)); err != nil {
@@ -758,7 +771,7 @@ func (ing *Ingester) windowSweep(ctx context.Context, start uint32, batches [][]
 		lastIngested = int64(end) - 1
 	}
 	now := time.Now().UTC()
-	err = ing.store.SaveIngestionState(ctx, store.IngestionState{LastIngestedLedger: lastIngested, LastSuccessfulPoll: &now})
+	err = ing.store.SaveIngestionState(ctx, store.IngestionState{Network: ing.opts.Network, LastIngestedLedger: lastIngested, LastSuccessfulPoll: &now})
 	if err != nil {
 		return false, err
 	}
@@ -1112,7 +1125,7 @@ func (bc *batchController) recordAndBackoff(rows int, latency time.Duration) tim
 }
 
 func (ing *Ingester) resolvePosition(ctx context.Context) (startLedger uint32, cursor string, err error) {
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return 0, "", err
 	}
@@ -1149,6 +1162,7 @@ func (ing *Ingester) reclampToOldest(ctx context.Context, requested uint32) erro
 	ing.log.Warn("resume ledger fell outside RPC retention window; skipping ahead — events in the gap are lost",
 		"requested_ledger", requested, "oldest_retained", health.OldestLedger)
 	return ing.store.SaveIngestionState(ctx, store.IngestionState{
+		Network:            ing.opts.Network,
 		LastIngestedLedger: int64(health.OldestLedger) - 1,
 	})
 }
@@ -1162,7 +1176,7 @@ func (ing *Ingester) reclampToOldest(ctx context.Context, requested uint32) erro
 // in that path — it guards against any future change that might persist a
 // cursor mid-sweep.
 func (ing *Ingester) discardCursor(ctx context.Context) {
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil {
 		ing.log.Warn("discardCursor: could not read state", "error", err)
 		return
@@ -1171,6 +1185,7 @@ func (ing *Ingester) discardCursor(ctx context.Context) {
 		return
 	}
 	if err := ing.store.SaveIngestionState(ctx, store.IngestionState{
+		Network:            ing.opts.Network,
 		LastIngestedLedger: state.LastIngestedLedger,
 	}); err != nil {
 		ing.log.Warn("discardCursor: could not save state", "error", err)
@@ -1209,7 +1224,7 @@ func (ing *Ingester) checkLag(ctx context.Context) {
 		// noise without adding information.
 		return
 	}
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Cold start: no baseline yet, but still publish the
