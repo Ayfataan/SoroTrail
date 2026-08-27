@@ -147,17 +147,27 @@ be merged without deep audit.
 
 ## Verification & Automated Checks
 
-Before submitting a pull request, please run the following commands locally:
+Before submitting a pull request, run `make ci` — it reproduces the CI gate
+locally (build, `go vet` with and without the `integration` tag, the tagged
+and untagged test suites, the benchmark smoke run, and `golangci-lint`) and
+stops at the first failing step, just like CI. The database-backed tests skip
+gracefully when `TEST_DATABASE_URL` (or Docker) is unavailable, so `make ci`
+passes without Postgres and runs the full gate once one is available.
+
+For individual checks, run each step on its own:
 
 ```bash
-go build ./...
-make test-db   # Requires local Postgres instance
-make lint
+make build-all        # go build ./...
+make vet              # go vet ./...
+make test-ci          # full untagged suite; DB-backed tests skip without TEST_DATABASE_URL
+make test-integration # integration-tagged suite against a real Postgres
+make bench-ci         # benchmark smoke run
+make lint             # golangci-lint run
+```
 
 ## Pull requests
 
-- `go build ./...`, `make test`, `make test-integration` and `make lint`
-  must pass.
+- `make ci` must pass before pushing.
 - Touching the events table? Update the column list in the migration test
   (`TestMigrations_ApplyFromEmptyLand`) — it's what catches drift
   between SQL and Go.
