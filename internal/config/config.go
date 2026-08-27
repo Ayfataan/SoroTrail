@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -286,6 +287,19 @@ func ParseLogLevel(raw string) slog.Level {
 		return slog.LevelError
 	default:
 		return slog.LevelInfo
+	}
+}
+
+// NewLogHandler returns the slog.Handler selected by a LOG_FORMAT value,
+// writing to w with the given options. "json" selects the JSON handler;
+// everything else — including unknown or empty values — falls back to the
+// text handler rather than failing startup (mirrors ParseLogLevel).
+func NewLogHandler(w io.Writer, format string, opts *slog.HandlerOptions) slog.Handler {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "json":
+		return slog.NewJSONHandler(w, opts)
+	default:
+		return slog.NewTextHandler(w, opts)
 	}
 }
 
