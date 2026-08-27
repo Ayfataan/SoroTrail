@@ -14,10 +14,13 @@ import (
 // is omitted. It matches the value used in QueryEvents when Limit is <= 0.
 const DefaultQueryLimit = 50
 
-// MaxQueryLimit is the upper bound for the ?limit= parameter; values above
-// this are rejected by the API layer before the store sees them. The API
-// enforces its own configurable limit (API_MAX_LIMIT, default 500), so
-// this value only matters as a store-level safety net.
+// MaxQueryLimit is the store-level clamp on page size: every query caps
+// limit at this value before hitting the database. The API layer enforces
+// its own configurable ceiling first — maxLimit in internal/api/server.go,
+// driven by API_MAX_LIMIT, default 500 — so this only bites when the API
+// allows more than 500 (API_MAX_LIMIT > MaxQueryLimit): the API then
+// accepts a limit the store silently clamps, and the caller gets a short
+// page with no error. Keep API_MAX_LIMIT <= MaxQueryLimit.
 const MaxQueryLimit = 500
 
 // Event is a Soroban contract event as persisted by SoroTrail.
@@ -142,6 +145,8 @@ func (s ReplayState) Done() bool { return s.CompletedAt != nil }
 
 // EventFilter narrows a QueryEvents call. Zero values mean "no constraint".
 type EventFilter struct {
+	// Network limits results to one configured Stellar network.
+	Network string
 	// ContractID is a single contract ID to filter by. For backward
 	// compatibility with callers that set a single ID (e.g.
 	// handleContractEvents). When set alongside ContractIDs, the two are
@@ -251,6 +256,13 @@ type IngestionState struct {
 	LastCursor         string
 	LastSuccessfulPoll *time.Time
 	UpdatedAt          time.Time
+}
+
+func defaultNetwork(network string) string {
+	if network == "" {
+		return "default"
+	}
+	return network
 }
 
 // ContractCursor tracks a single watched contract's resume position.
@@ -778,6 +790,10 @@ type Store interface {
 	// and (when beforeTime is non-zero) older than beforeTime. The limit
 	// keeps a single DELETE from holding a long lock; the pruner loops.
 	DeleteEventsBefore(ctx context.Context, maxLedger int64, beforeTime time.Time, limit int) (int64, error)
+	// CountEventsBefore counts events strictly below maxLedger and
+	// (when beforeTime is non-zero) older than beforeTime. Used by the
+	// pruner in dry-run mode to report eligible rows without deleting.
+	CountEventsBefore(ctx context.Context, maxLedger int64, beforeTime time.Time, limit int) (int64, error)
 
 	// UpsertAddressRefs inserts address→event index rows idempotently.
 	// Duplicate (address, event_id, role) combinations are silently ignored.

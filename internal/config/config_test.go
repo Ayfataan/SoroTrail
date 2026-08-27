@@ -19,7 +19,7 @@ const validContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
 var envKeys = []string{
 	"RPC_URL", "RPC_URLS", "RPC_RATE_LIMIT_RPS", "RPC_RATE_LIMIT", "DATABASE_URL",
 	"POLL_INTERVAL", "HTTP_ADDR",
-	"WATCHED_CONTRACTS", "START_LEDGER", "RETENTION_LEDGERS", "LOG_LEVEL", "LOG_FORMAT",
+	"WATCHED_CONTRACTS", "START_LEDGER", "RETENTION_LEDGERS", "INGEST_PAGE_SIZE", "INGEST_BATCH_SIZE", "LOG_LEVEL", "LOG_FORMAT",
 	"API_QUERY_TIMEOUT", "API_SLOW_QUERY_THRESHOLD",
 	"HORIZON_URL", "BACKFILL_RATE_RPS",
 	"AUDIT_ENABLED", "AUDIT_POLL_INTERVAL", "AUDIT_BATCH_LEDGERS",
@@ -60,6 +60,8 @@ func TestLoad(t *testing.T) {
 				assert.Equal(t, ":8080", c.HTTPAddr)
 				assert.Equal(t, uint32(17280), c.RetentionLedgers)
 				assert.Equal(t, uint32(120960), c.PartitionLedgerSpan)
+				assert.Equal(t, uint(1000), c.IngestPageSize)
+				assert.Equal(t, uint(1000), c.IngestBatchSize)
 				assert.Empty(t, c.WatchedContracts)
 				assert.Equal(t, uint32(100), c.LagWarnLedgers,
 					"LagWarnLedgers default lets the lag alarm work out of the box")
@@ -305,6 +307,34 @@ func TestLoad(t *testing.T) {
 				"RETENTION_BATCH_SIZE": "0",
 			},
 			wantErr: "RETENTION_BATCH_SIZE must be positive",
+		},
+		{
+			name: "ingest sizes configurable",
+			env: map[string]string{
+				"DATABASE_URL":      "postgres://localhost/db",
+				"INGEST_PAGE_SIZE":  "250",
+				"INGEST_BATCH_SIZE": "75",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, uint(250), c.IngestPageSize)
+				assert.Equal(t, uint(75), c.IngestBatchSize)
+			},
+		},
+		{
+			name: "zero ingest page size rejected",
+			env: map[string]string{
+				"DATABASE_URL":     "postgres://localhost/db",
+				"INGEST_PAGE_SIZE": "0",
+			},
+			wantErr: "INGEST_PAGE_SIZE must be positive",
+		},
+		{
+			name: "zero ingest batch size rejected",
+			env: map[string]string{
+				"DATABASE_URL":      "postgres://localhost/db",
+				"INGEST_BATCH_SIZE": "0",
+			},
+			wantErr: "INGEST_BATCH_SIZE must be positive",
 		},
 		{
 			name: "bad retention pause",
@@ -1340,4 +1370,49 @@ func TestLoad_MultiTenancy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseStartLedger(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		latest  uint32
+		want    uint32
+		wantErr string
+	}{
+		{name: "absolute", raw: "12345", want: 12345},
+		{name: "absolute min ledger 2", raw: "2", want: 2},
+		{name: "absolute below min ledger rejected", raw: "1", wantErr: "must be >= 2"},
+		{name: "relative offset", raw: "latest-1000", latest: 50000, want: 49000},
+		{name: "relative offset clamps to 2", raw: "latest-100000", latest: 50000, want: 2},
+		{name: "relative offset no latest", raw: "latest-1000", wantErr: "not available"},
+		{name: "relative offset zero", raw: "latest-0", wantErr: "offset must be a positive"},
+		{name: "empty", raw: "", want: 0},
+		{name: "invalid", raw: "abc", wantErr: "not an absolute"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got uint32
+			var err error
+			if tt.latest > 0 {
+				got, err = ParseStartLedger(tt.raw, tt.latest)
+			} else {
+				got, err = ParseStartLedger(tt.raw)
+			}
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestLoadStartLedgerRaw(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("START_LEDGER_RAW", "latest-500")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "latest-500", cfg.StartLedgerRaw)
 }
