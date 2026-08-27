@@ -1,3 +1,5 @@
+//go:build integration
+
 package store
 
 import (
@@ -33,6 +35,7 @@ func TestPaginationBoundary(t *testing.T) {
 			for _, order := range []string{"", "asc", "desc"} {
 				t.Run(orderBy+"/"+order, func(t *testing.T) {
 					events, cursor, err := p.QueryEvents(context.Background(), EventFilter{
+						Scope:   WildcardScope(),
 						OrderBy: orderBy,
 						Order:   order,
 						Limit:   10,
@@ -50,6 +53,7 @@ func TestPaginationBoundary(t *testing.T) {
 		_ = seedEvents(t, p, 5)
 
 		events, cursor, err := p.QueryEvents(context.Background(), EventFilter{
+			Scope:      WildcardScope(),
 			ContractID: contractB, // no events for this contract
 			Limit:      10,
 		})
@@ -78,6 +82,7 @@ func TestPaginationBoundary(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				events, cursor, err := p.QueryEvents(context.Background(), EventFilter{
+					Scope:   WildcardScope(),
 					OrderBy: tc.orderBy,
 					Order:   tc.order,
 					Limit:   10,
@@ -96,6 +101,7 @@ func TestPaginationBoundary(t *testing.T) {
 		seeded := seedEvents(t, p, 5)
 
 		events, cursor, err := p.QueryEvents(context.Background(), EventFilter{
+			Scope: WildcardScope(),
 			Limit: 5,
 		})
 		require.NoError(t, err)
@@ -125,6 +131,7 @@ func TestPaginationBoundary(t *testing.T) {
 				cursor := ""
 				for range 10 { // bounded safety
 					page, next, err := p.QueryEvents(context.Background(), EventFilter{
+						Scope:   WildcardScope(),
 						OrderBy: tc.orderBy,
 						Order:   tc.order,
 						Limit:   3,
@@ -149,8 +156,8 @@ func TestPaginationBoundary(t *testing.T) {
 	})
 
 	t.Run("exact multiple of limit across filter", func(t *testing.T) {
-		// Filter to contractA (5 events) with limit=5, then
-		// contractB with limit=5. Both should be exact fits.
+		// Filter to contractA (3 events) with limit=3, then
+		// contractB with limit=3. Both should be exact fits.
 		p := testStore(t)
 		// Seed 6 events: odd for contractA, even for contractB.
 		var events []Event
@@ -170,6 +177,7 @@ func TestPaginationBoundary(t *testing.T) {
 				cursor := ""
 				for range 10 {
 					page, next, err := p.QueryEvents(context.Background(), EventFilter{
+						Scope:      WildcardScope(),
 						ContractID: contract,
 						Limit:      3,
 						Cursor:     cursor,
@@ -196,19 +204,23 @@ func TestPaginationBoundary_CountEvents(t *testing.T) {
 	_ = seedEvents(t, p, 6)
 
 	t.Run("count ignores cursor and limit", func(t *testing.T) {
-		total, err := p.CountEvents(context.Background(), EventFilter{})
+		total, err := p.CountEvents(context.Background(), EventFilter{
+			Scope: WildcardScope(),
+		})
 		require.NoError(t, err)
 		assert.Equal(t, int64(6), total)
 	})
 
 	t.Run("count after first page", func(t *testing.T) {
 		_, cursor, err := p.QueryEvents(context.Background(), EventFilter{
+			Scope: WildcardScope(),
 			Limit: 3,
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, cursor)
 
 		total, err := p.CountEvents(context.Background(), EventFilter{
+			Scope:  WildcardScope(),
 			Cursor: cursor,
 			Limit:  3,
 		})
@@ -219,6 +231,7 @@ func TestPaginationBoundary_CountEvents(t *testing.T) {
 
 	t.Run("count for no-match filter", func(t *testing.T) {
 		total, err := p.CountEvents(context.Background(), EventFilter{
+			Scope:      WildcardScope(),
 			ContractID: contractB,
 		})
 		require.NoError(t, err)
@@ -234,6 +247,7 @@ func TestPaginationBoundary_ExactMultipleWithDesc(t *testing.T) {
 	seeded := seedEvents(t, p, 4) // 4 events, limit=2 → 2 full pages
 
 	page1, cursor1, err := p.QueryEvents(context.Background(), EventFilter{
+		Scope: WildcardScope(),
 		Order: "desc",
 		Limit: 2,
 	})
@@ -246,8 +260,9 @@ func TestPaginationBoundary_ExactMultipleWithDesc(t *testing.T) {
 	assert.Equal(t, seeded[2].ID, page1[1].ID)
 
 	page2, cursor2, err := p.QueryEvents(context.Background(), EventFilter{
-		Order: "desc",
-		Limit: 2,
+		Scope:  WildcardScope(),
+		Order:  "desc",
+		Limit:  2,
 		Cursor: cursor1,
 	})
 	require.NoError(t, err)
@@ -278,6 +293,7 @@ func TestPaginationBoundary_SingleEvent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			events, cursor, err := p.QueryEvents(context.Background(), EventFilter{
+				Scope:   WildcardScope(),
 				OrderBy: tc.orderBy,
 				Order:   tc.order,
 				Limit:   tc.limit,
@@ -314,6 +330,7 @@ func TestPaginationBoundary_NonEmptyTopics(t *testing.T) {
 		cursor := ""
 		for range 5 {
 			page, next, err := p.QueryEvents(context.Background(), EventFilter{
+				Scope: WildcardScope(),
 				Topic: json.RawMessage(`{"symbol":"transfer"}`),
 				Limit: 2,
 				Cursor: cursor,
@@ -331,6 +348,7 @@ func TestPaginationBoundary_NonEmptyTopics(t *testing.T) {
 
 	t.Run("topic filter no match", func(t *testing.T) {
 		events, cursor, err := p.QueryEvents(context.Background(), EventFilter{
+			Scope: WildcardScope(),
 			Topic: json.RawMessage(`{"symbol":"burn"}`),
 			Limit: 10,
 		})
