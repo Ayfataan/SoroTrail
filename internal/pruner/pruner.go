@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sorotrail/sorotrail/internal/archive"
 	"github.com/sorotrail/sorotrail/internal/store"
 )
 
@@ -30,6 +31,11 @@ type Options struct {
 	// Interval is the sleep between full sweep attempts when there is
 	// nothing left to prune. Default 1h.
 	Interval time.Duration
+	// ArchiveBeforePrune, when true, instructs the pruner to export
+	// events to object storage before deleting them. Requires that the
+	// Archiver was configured. When false (the default), events are
+	// deleted directly without archival.
+	ArchiveBeforePrune bool
 }
 
 // DefaultValues used when Options fields are zero.
@@ -58,6 +64,7 @@ func (o *Options) applyDefaults() {
 type Metrics struct {
 	RunsCompleted   uint64 `json:"runs_completed"`
 	TotalRowsPurged int64  `json:"total_rows_purged"`
+	ArchivedRanges  int64  `json:"archived_ranges,omitempty"`
 }
 
 // Pruner is the background retention-policy job.
@@ -71,10 +78,12 @@ type Pruner struct {
 	store store.Store
 	log   *slog.Logger
 	opts  Options
+	arch  *archive.Archiver // nil when archival is disabled
 
 	// Atomics: written by Run, read by HTTP handlers via Metrics().
-	runsCompleted atomic.Uint64
-	rowsPurged    atomic.Int64
+	runsCompleted  atomic.Uint64
+	rowsPurged     atomic.Int64
+	archivedRanges atomic.Int64
 }
 
 // Metrics returns a value-copy snapshot of the pruner's counters.
@@ -84,17 +93,27 @@ func (p *Pruner) Metrics() Metrics {
 	return Metrics{
 		RunsCompleted:   p.runsCompleted.Load(),
 		TotalRowsPurged: p.rowsPurged.Load(),
+		ArchivedRanges:  p.archivedRanges.Load(),
 	}
 }
 
 // New wires a Pruner. When both MaxAge and MinLedger are zero the pruner
 // is effectively a no-op (Run returns immediately).
 func New(st store.Store, log *slog.Logger, opts Options) *Pruner {
+	return NewWithArchiver(st, log, opts, nil)
+}
+
+// NewWithArchiver wires a Pruner with an optional archiver. When arch
+// is non-nil and ArchiveBeforePrune is set, events are exported to
+// object storage before each batch deletion. When arch is nil the
+// pruner behaves identically to New.
+func NewWithArchiver(st store.Store, log *slog.Logger, opts Options, arch *archive.Archiver) *Pruner {
 	opts.applyDefaults()
 	return &Pruner{
 		store: st,
 		log:   log.With("component", "pruner"),
 		opts:  opts,
+		arch:  arch,
 	}
 }
 
@@ -140,11 +159,15 @@ func (p *Pruner) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-}
-
-// pruneOnce performs one full sweep: deletes batches until fewer than
+} // pruneOnce performs one full sweep: deletes batches until fewer than
 // BatchSize rows are returned, then logs a summary. Returns the total
 // number of rows deleted in the sweep.
+//
+// When archival is configured and ArchiveBeforePrune is set, events are
+// exported to object storage as compressed NDJSON before each batch
+// deletion. Archival failure aborts the sweep — events are never
+// deleted without a successful archive, ensuring pruned ranges are
+// always recoverable.
 func (p *Pruner) pruneOnce(ctx context.Context) (int64, error) {
 	ing, err := p.store.GetIngestionState(ctx)
 	if err != nil {
@@ -177,6 +200,24 @@ func (p *Pruner) pruneOnce(ctx context.Context) (int64, error) {
 	// can only ever shrink, never grow, which is the safety contract.
 	if p.opts.MinLedger > 0 && uint64(maxLedger) > p.opts.MinLedger {
 		maxLedger = int64(p.opts.MinLedger)
+	}
+
+	// Archive events before deleting them when archival is enabled.
+	// The archive covers the full range [0, maxLedger) that will be
+	// pruned. This is a single export call; the archiver pages through
+	// events using QueryEvents and uploads compressed NDJSON to S3.
+	if p.opts.ArchiveBeforePrune && p.arch != nil {
+		archiveStart := time.Now()
+		_, _, err := p.arch.ArchiveRange(ctx, 0, maxLedger)
+		if err != nil {
+			return 0, fmt.Errorf("archiving events before prune: %w", err)
+		}
+		p.archivedRanges.Add(1)
+		p.log.Info("archive before prune complete",
+			"max_ledger", maxLedger,
+			"before_time", beforeTime,
+			"duration", time.Since(archiveStart),
+		)
 	}
 
 	start := time.Now()

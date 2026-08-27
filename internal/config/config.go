@@ -77,6 +77,21 @@ type Config struct {
 	RetentionPause     time.Duration `env:"RETENTION_PAUSE" envDefault:"100ms"`
 	RetentionInterval  time.Duration `env:"RETENTION_INTERVAL" envDefault:"1h"`
 
+	// Archive configuration. When ARCHIVE_BUCKET is set, pruned events
+	// are exported to S3-compatible object storage as compressed NDJSON
+	// before deletion, ensuring pruned ranges are recoverable. All
+	// archive_* fields are optional; without them the binary behaves
+	// identically to the pre-archive build.
+	ArchiveBucket          string `env:"ARCHIVE_BUCKET"`
+	ArchivePrefix          string `env:"ARCHIVE_PREFIX"`
+	ArchiveEndpoint        string `env:"ARCHIVE_ENDPOINT"`
+	ArchiveRegion          string `env:"ARCHIVE_REGION"`
+	ArchiveAccessKeyID     string `env:"ARCHIVE_ACCESS_KEY_ID"`
+	ArchiveSecretAccessKey string `env:"ARCHIVE_SECRET_ACCESS_KEY"`
+	ArchiveUseSSL          bool   `env:"ARCHIVE_USE_SSL"`
+	ArchiveBeforePrune     bool   `env:"ARCHIVE_BEFORE_PRUNE" envDefault:"false"`
+	ArchiveMaxRetries      int    `env:"ARCHIVE_MAX_RETRIES" envDefault:"3"`
+
 	// LagWarnLedgers triggers a warn-level log when the ingester falls this
 	// many ledgers behind the chain head. Zero disables the alarm.
 	LagWarnLedgers uint32 `env:"LAG_WARN_LEDGERS" envDefault:"100"`
@@ -542,6 +557,15 @@ func (c Config) Validate() error {
 	if c.MultiTenantBootstrapKey != "" && !c.MultiTenant {
 		return fmt.Errorf("MULTI_TENANT_BOOTSTRAP_KEY is set but MULTI_TENANT is false")
 	}
+	// Archive configuration: ARCHIVE_BUCKET is the master switch. When
+	// set, the endpoint must also be provided (S3-compatible stores
+	// need an explicit endpoint).
+	if c.ArchiveBucket != "" && c.ArchiveEndpoint == "" {
+		return fmt.Errorf("ARCHIVE_ENDPOINT is required when ARCHIVE_BUCKET is set")
+	}
+	if c.ArchiveMaxRetries < 0 {
+		return fmt.Errorf("ARCHIVE_MAX_RETRIES must be non-negative")
+	}
 	return nil
 }
 
@@ -549,6 +573,13 @@ func (c Config) Validate() error {
 // configured — the pruner only runs when this is true.
 func (c Config) RetentionEnabled() bool {
 	return c.RetentionMaxAge > 0 || c.RetentionMinLedger > 0
+}
+
+// ArchiveEnabled reports whether the S3-compatible archive backend
+// is configured. When true, pruned events can be exported before
+// deletion.
+func (c Config) ArchiveEnabled() bool {
+	return c.ArchiveBucket != ""
 }
 
 // ValidContractID reports whether s looks like a Soroban contract strkey.
