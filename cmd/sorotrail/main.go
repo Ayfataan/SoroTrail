@@ -259,6 +259,7 @@ func run() error {
 		BatchMaxBackoff:         cfg.BatchMaxBackoff,
 		ReorgConfirmationWindow: cfg.ReorgConfirmationWindow,
 		ReorgRescanInterval:     cfg.ReorgRescanInterval,
+		Network:                 cfg.Network,
 	}).WithBroadcaster(bcast)
 	ing.SetNotifier(wh)
 	// Wire the same store as the dead-letter sink: events that fail to
