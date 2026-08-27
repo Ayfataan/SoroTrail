@@ -9,6 +9,11 @@ field halts the process mid-flight; every problem is printed before `os.Exit(1)`
 |----------------|-----------------------------|
 | `DATABASE_URL` | Must be a non-empty string. |
 
+`NETWORK` selects `testnet` (the default), `mainnet`, or `futurenet`. When
+`RPC_URL` is not set, the selected network supplies its standard Soroban RPC
+endpoint and Stellar network passphrase. Ingestion state and persisted events
+are keyed by this network, so changing networks does not reuse cursors.
+
 ## URL format
 | Variable   | Rule                                 |
 |------------|--------------------------------------|

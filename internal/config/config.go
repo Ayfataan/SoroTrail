@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -15,13 +16,26 @@ import (
 
 // NetworkConfig describes one Stellar network to index.
 type NetworkConfig struct {
-	Name   string `json:"name"`
-	RPCURL string `json:"rpc_url"`
+	Name       string `json:"name"`
+	RPCURL     string `json:"rpc_url"`
+	Passphrase string `json:"passphrase"`
+}
+
+var networks = map[string]NetworkConfig{
+	"testnet":   {Name: "testnet", RPCURL: "https://soroban-testnet.stellar.org", Passphrase: "Test SDF Network ; September 2015"},
+	"mainnet":   {Name: "mainnet", RPCURL: "https://mainnet.sorobanrpc.com", Passphrase: "Public Global Stellar Network ; September 2015"},
+	"futurenet": {Name: "futurenet", RPCURL: "https://rpc-futurenet.stellar.org", Passphrase: "Test SDF Future Network ; October 2022"},
+}
+
+func NetworkConfigFor(name string) (NetworkConfig, bool) {
+	c, ok := networks[strings.ToLower(strings.TrimSpace(name))]
+	return c, ok
 }
 
 // Config holds all runtime configuration. Every field is settable via the
 // environment variable named in its `env` tag; see .env.example for docs.
 type Config struct {
+	Network string `env:"NETWORK" envDefault:"testnet"`
 	// RPCURL is the single-provider RPC endpoint. When RPC_URLS is set the
 	// multi-provider failover client is used instead and RPC_URL is ignored.
 	RPCURL string `env:"RPC_URL" envDefault:"https://soroban-testnet.stellar.org"`
@@ -280,6 +294,13 @@ func Load() (Config, error) {
 	cfg.WatchedContracts = cleanContractList(cfg.WatchedContracts)
 	cfg.RPCURLS = cleanContractList(cfg.RPCURLS)
 	cfg.CORSAllowedOrigins = cleanOrigins(cfg.CORSAllowedOrigins)
+	cfg.Network = strings.ToLower(strings.TrimSpace(cfg.Network))
+	if _, ok := NetworkConfigFor(cfg.Network); !ok {
+		return Config{}, fmt.Errorf("NETWORK must be one of testnet, mainnet, futurenet; got %q", cfg.Network)
+	}
+	if _, explicitlySet := os.LookupEnv("RPC_URL"); !explicitlySet && len(cfg.RPCURLS) == 0 {
+		cfg.RPCURL = networks[cfg.Network].RPCURL
+	}
 	if err := cfg.ValidateAll(); err != nil {
 		return Config{}, err
 	}
@@ -638,6 +659,7 @@ func (c Config) LoggableFields() []any {
 		dbURL = u.String()
 	}
 	return []any{
+		"network", c.Network,
 		"rpc_url", c.RPCURL,
 		"metrics_enabled", c.MetricsEnabled,
 		"rpc_max_attempts", c.RPCMaxAttempts,

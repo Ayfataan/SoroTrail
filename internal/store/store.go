@@ -142,6 +142,8 @@ func (s ReplayState) Done() bool { return s.CompletedAt != nil }
 
 // EventFilter narrows a QueryEvents call. Zero values mean "no constraint".
 type EventFilter struct {
+	// Network limits results to one configured Stellar network.
+	Network string
 	// ContractID is a single contract ID to filter by. For backward
 	// compatibility with callers that set a single ID (e.g.
 	// handleContractEvents). When set alongside ContractIDs, the two are
@@ -251,6 +253,13 @@ type IngestionState struct {
 	LastCursor         string
 	LastSuccessfulPoll *time.Time
 	UpdatedAt          time.Time
+}
+
+func defaultNetwork(network string) string {
+	if network == "" {
+		return "default"
+	}
+	return network
 }
 
 // ContractCursor tracks a single watched contract's resume position.
