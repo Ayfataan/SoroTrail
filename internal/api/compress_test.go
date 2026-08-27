@@ -613,8 +613,6 @@ func TestWeakenETag(t *testing.T) {
 		{
 			name: "missing ETag header is a no-op",
 			setup: func(h http.Header) {},
-			name:     "missing ETag header is a no-op",
-			setup:    func(h http.Header) {},
 			expected: "",
 		},
 		{
