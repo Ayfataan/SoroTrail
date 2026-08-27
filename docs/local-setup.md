@@ -84,12 +84,13 @@ curl -s http://localhost:8080/stats
 
 ## 4. Testing
 
-`go test ./...` is the **unit suite only** and stays fast (under ~10s) because
-the integration tests are gated behind the `integration` build tag.
+`make test` is the **unit suite only**, race-detector enabled (`go test -race ./...`),
+and stays fast because the integration tests are gated behind the
+`integration` build tag; `make test-fast` is the plain non-race run.
 
 | Command | What it does |
 | --- | --- |
-| `make test` | Unit tests (`go test ./...`), no external services. |
+| `make test` | Unit tests with the race detector (`go test -race ./...`), no external services; `make test-fast` for the plain run. |
 | `make test-integration` | Integration suite (`-tags=integration -p 1`) against a **real Postgres**. Uses `TEST_DATABASE_URL` if set; otherwise spins up an ephemeral Postgres 16-alpine via testcontainers-go per test. |
 | `make test-db` | Runs everything, including integration tests, against the Postgres in `TEST_DATABASE_URL`. |
 | `make simtest` | Deterministic simulation suite (mock store, fast). |

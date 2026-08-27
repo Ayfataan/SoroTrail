@@ -11,15 +11,37 @@ BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown
 
 LDFLAGS := -ldflags="-X github.com/sorotrail/sorotrail/internal/buildinfo.Version=$(VERSION) -X github.com/sorotrail/sorotrail/internal/buildinfo.Commit=$(COMMIT) -X github.com/sorotrail/sorotrail/internal/buildinfo.BuildDate=$(BUILD_DATE)"
 
-.PHONY: build run test test-db test-integration lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec
+.PHONY: build build-all build-all-integration run test test-fast test-db test-integration vet vet-integration test-ci lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec ci
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/sorotrail
 
+# Compile every package, like the CI test job's build step, rather than
+# only the binary. Kept separate from `build` so `ci` can mirror CI
+# closely without changing what `build` produces.
+build-all:
+	go build ./...
+
+# Compile every package with the `integration` build tag, mirroring the
+# CI integration job's build step so an untagged build can't hide a break
+# in the tagged code.
+build-all-integration:
+	go build -tags=integration ./...
+
 run: build
 	./$(BINARY)
 
+# Run the unit suite with the race detector enabled, matching CI's
+# race-enabled run so a data race can't pass locally and fail in CI.
+# -race requires cgo and a C toolchain (gcc); see CONTRIBUTING.md for
+# the Windows note. If the slowdown is unwelcome, use `test-fast`.
 test:
+	go test -race ./...
+
+# Plain unit-suite run without the race detector — the previous `test`
+# behavior, for when the -race overhead (or a missing C toolchain, e.g.
+# on Windows) makes the race-enabled run impractical.
+test-fast:
 	go test ./...
 
 # Run the full test suite including Postgres integration tests.
@@ -28,6 +50,14 @@ test:
 # internal/replay share one database and truncate the same tables.
 test-db:
 	TEST_DATABASE_URL=$(DATABASE_URL) go test -p 1 ./...
+
+vet:
+	go vet ./...
+
+# Vet the integration-tagged code too; `go vet ./...` alone skips files
+# behind the `integration` build tag.
+vet-integration:
+	go vet -tags=integration ./...
 
 # Integration test suite only, gated behind the `integration` build tag so
 # `go test ./...` stays fast. The suite honors TEST_DATABASE_URL when set
@@ -42,6 +72,16 @@ test-db:
 # share one database and truncate the same tables.
 test-integration:
 	go test -tags=integration -p 1 ./... -count=1
+
+# Mirror the CI test job's suite: the full untagged test run, serialized
+# across packages and race-enabled, as CI runs it. The DB-backed tests
+# t.Skip when TEST_DATABASE_URL is unset (see internal/store/postgres_test.go),
+# so this passes without a database and silently scales up to the full CI
+# gate the moment TEST_DATABASE_URL (or Postgres behind the default
+# DATABASE_URL) is available.
+test-ci:
+	go test -p 1 ./... -count=1 -race -timeout=120s
+
 # Run the deterministic simulation test suite (mock store, fast).
 simtest:
 	go test ./internal/simtest/... -count=1 -timeout 120s
@@ -72,6 +112,24 @@ seed:
 
 lint:
 	golangci-lint run
+
+# Reproduce the CI gate locally: the test + integration + lint jobs from
+# .github/workflows/ci.yml run build, vet (plain and integration-tagged),
+# the tagged and untagged test suites, the benchmark smoke run, and
+# golangci-lint. Each piece delegates to the existing target above so the
+# target list and CI can't drift, and runs as a sub-make with the default
+# `-k` unset, so the first failing step stops the run — one error at a
+# time, in CI's order. DB-backed suites skip gracefully when
+# TEST_DATABASE_URL (or Docker) is unavailable rather than fail.
+ci:
+	$(MAKE) build-all
+	$(MAKE) vet
+	$(MAKE) test-ci
+	$(MAKE) bench-ci
+	$(MAKE) build-all-integration
+	$(MAKE) vet-integration
+	$(MAKE) test-integration
+	$(MAKE) lint
 
 # Regenerate the JSON copy of the OpenAPI spec that internal/api embeds and
 # serves at /openapi.json. api/openapi.yaml is the source of truth; run this

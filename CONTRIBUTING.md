@@ -18,8 +18,13 @@ seams — most features should slot in behind an existing interface.
 2. `docker compose up -d postgres` for a local database (the integration
    suite can also spin up its own ephemeral container — see "How the
    integration test layer works" below).
-3. `make test` for the unit suite; it stays fast (under ~10s) because
-   the integration tests are gated behind the `integration` build tag.
+3. `make test` for the unit suite, race-detector enabled
+   (`go test -race ./...`) — the same race checking CI runs, so a data
+   race can't pass locally and fail in CI. The integration tests are
+   gated behind the `integration` build tag, so it stays a unit-only
+   run. `-race` requires cgo and a C toolchain; on Windows, install gcc
+   (e.g. MinGW-w64) or use `make test-fast` for the plain, non-race
+   run.
 4. `make test-integration` runs the integration suite against a real
    Postgres — `go test -tags=integration -p 1 ./... -count=1`.
 5. `make test-db` runs everything, including integration tests, against
@@ -68,8 +73,8 @@ Database resolution, in order:
   missing infra.
 
 `make test-integration` runs `go test -tags=integration -p 1 ./... -count=1`.
-Without the tag, `go test ./...` is unit-suite-only and stays fast
-(under ~10s).
+Without the tag, the run is unit-suite-only: `make test` adds `-race`
+(CI's race checking) and `make test-fast` keeps the plain, fastest run.
 
 ## Fuzz testing
 
@@ -164,17 +169,32 @@ be merged without deep audit.
 
 ## Verification & Automated Checks
 
-Before submitting a pull request, please run the following commands locally:
+Before submitting a pull request, run `make ci` — it reproduces the CI gate
+locally (build, `go vet` with and without the `integration` tag, the tagged
+and untagged test suites, the benchmark smoke run, and `golangci-lint`) and
+stops at the first failing step, just like CI. The database-backed tests skip
+gracefully when `TEST_DATABASE_URL` (or Docker) is unavailable, so `make ci`
+passes without Postgres and runs the full gate once one is available.
+
+`make test-ci` is the exact command the CI test job runs
+(`go test -p 1 ./... -count=1 -race -timeout=120s`); `make test` runs the
+same race detector with less ceremony, and `make test-fast` is the plain
+non-race run.
+
+For individual checks, run each step on its own:
 
 ```bash
-go build ./...
-make test-db   # Requires local Postgres instance
-make lint
+make build-all        # go build ./...
+make vet              # go vet ./...
+make test-ci          # CI test job's exact command; DB-backed tests skip without TEST_DATABASE_URL
+make test-integration # integration-tagged suite against a real Postgres
+make bench-ci         # benchmark smoke run
+make lint             # golangci-lint run
+```
 
 ## Pull requests
 
-- `go build ./...`, `make test`, `make test-integration` and `make lint`
-  must pass.
+- `make ci` must pass before pushing.
 - Touching the events table? Update the column list in the migration test
   (`TestMigrations_ApplyFromEmptyLand`) — it's what catches drift
   between SQL and Go.
