@@ -19,7 +19,7 @@ const validContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
 var envKeys = []string{
 	"RPC_URL", "RPC_URLS", "RPC_RATE_LIMIT_RPS", "RPC_RATE_LIMIT", "DATABASE_URL",
 	"POLL_INTERVAL", "HTTP_ADDR",
-	"WATCHED_CONTRACTS", "START_LEDGER", "RETENTION_LEDGERS", "LOG_LEVEL", "LOG_FORMAT",
+	"WATCHED_CONTRACTS", "START_LEDGER", "RETENTION_LEDGERS", "INGEST_PAGE_SIZE", "INGEST_BATCH_SIZE", "LOG_LEVEL", "LOG_FORMAT",
 	"API_QUERY_TIMEOUT", "API_SLOW_QUERY_THRESHOLD",
 	"HORIZON_URL", "BACKFILL_RATE_RPS",
 	"AUDIT_ENABLED", "AUDIT_POLL_INTERVAL", "AUDIT_BATCH_LEDGERS",
@@ -60,6 +60,8 @@ func TestLoad(t *testing.T) {
 				assert.Equal(t, ":8080", c.HTTPAddr)
 				assert.Equal(t, uint32(17280), c.RetentionLedgers)
 				assert.Equal(t, uint32(120960), c.PartitionLedgerSpan)
+				assert.Equal(t, uint(1000), c.IngestPageSize)
+				assert.Equal(t, uint(1000), c.IngestBatchSize)
 				assert.Empty(t, c.WatchedContracts)
 				assert.Equal(t, uint32(100), c.LagWarnLedgers,
 					"LagWarnLedgers default lets the lag alarm work out of the box")
@@ -305,6 +307,34 @@ func TestLoad(t *testing.T) {
 				"RETENTION_BATCH_SIZE": "0",
 			},
 			wantErr: "RETENTION_BATCH_SIZE must be positive",
+		},
+		{
+			name: "ingest sizes configurable",
+			env: map[string]string{
+				"DATABASE_URL":      "postgres://localhost/db",
+				"INGEST_PAGE_SIZE":  "250",
+				"INGEST_BATCH_SIZE": "75",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, uint(250), c.IngestPageSize)
+				assert.Equal(t, uint(75), c.IngestBatchSize)
+			},
+		},
+		{
+			name: "zero ingest page size rejected",
+			env: map[string]string{
+				"DATABASE_URL":     "postgres://localhost/db",
+				"INGEST_PAGE_SIZE": "0",
+			},
+			wantErr: "INGEST_PAGE_SIZE must be positive",
+		},
+		{
+			name: "zero ingest batch size rejected",
+			env: map[string]string{
+				"DATABASE_URL":      "postgres://localhost/db",
+				"INGEST_BATCH_SIZE": "0",
+			},
+			wantErr: "INGEST_BATCH_SIZE must be positive",
 		},
 		{
 			name: "bad retention pause",

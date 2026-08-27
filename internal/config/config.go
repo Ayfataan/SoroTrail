@@ -7,7 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
-	"strconv"
+	"os"
 	"strings"
 	"time"
 
@@ -16,13 +16,26 @@ import (
 
 // NetworkConfig describes one Stellar network to index.
 type NetworkConfig struct {
-	Name   string `json:"name"`
-	RPCURL string `json:"rpc_url"`
+	Name       string `json:"name"`
+	RPCURL     string `json:"rpc_url"`
+	Passphrase string `json:"passphrase"`
+}
+
+var networks = map[string]NetworkConfig{
+	"testnet":   {Name: "testnet", RPCURL: "https://soroban-testnet.stellar.org", Passphrase: "Test SDF Network ; September 2015"},
+	"mainnet":   {Name: "mainnet", RPCURL: "https://mainnet.sorobanrpc.com", Passphrase: "Public Global Stellar Network ; September 2015"},
+	"futurenet": {Name: "futurenet", RPCURL: "https://rpc-futurenet.stellar.org", Passphrase: "Test SDF Future Network ; October 2022"},
+}
+
+func NetworkConfigFor(name string) (NetworkConfig, bool) {
+	c, ok := networks[strings.ToLower(strings.TrimSpace(name))]
+	return c, ok
 }
 
 // Config holds all runtime configuration. Every field is settable via the
 // environment variable named in its `env` tag; see .env.example for docs.
 type Config struct {
+	Network string `env:"NETWORK" envDefault:"testnet"`
 	// RPCURL is the single-provider RPC endpoint. When RPC_URLS is set the
 	// multi-provider failover client is used instead and RPC_URL is ignored.
 	RPCURL string `env:"RPC_URL" envDefault:"https://soroban-testnet.stellar.org"`
@@ -44,17 +57,10 @@ type Config struct {
 	PollInterval          time.Duration `env:"POLL_INTERVAL" envDefault:"5s"`
 	HTTPAddr              string        `env:"HTTP_ADDR" envDefault:":8080"`
 	WatchedContracts      []string      `env:"WATCHED_CONTRACTS"`
-	// StartLedger is the absolute cold-start ledger. When zero, the
-	// ingester falls back to StartLedgerRaw (relative offset) or the
-	// default retention-window calculation.
-	StartLedger uint32 `env:"START_LEDGER"`
-	// StartLedgerRaw holds the raw START_LEDGER value from the
-	// environment so the ingester can parse relative offsets (e.g.
-	// "latest-1000") at runtime when the RPC client is available.
-	// For absolute numeric values this is also populated so the
-	// ingester can validate against the RPC retention window.
-	StartLedgerRaw string `env:"START_LEDGER_RAW"`
-	RetentionLedgers uint32 `env:"RETENTION_LEDGERS" envDefault:"17280"`
+	StartLedger           uint32        `env:"START_LEDGER"`
+	RetentionLedgers      uint32        `env:"RETENTION_LEDGERS" envDefault:"17280"`
+	IngestPageSize        uint          `env:"INGEST_PAGE_SIZE" envDefault:"1000"`
+	IngestBatchSize       uint          `env:"INGEST_BATCH_SIZE" envDefault:"1000"`
 	PartitionLedgerSpan   uint32        `env:"PARTITION_LEDGER_SPAN" envDefault:"120960"`
 	LogLevel              string        `env:"LOG_LEVEL" envDefault:"info"`
 	LogFormat             string        `env:"LOG_FORMAT" envDefault:"text"`
@@ -288,10 +294,12 @@ func Load() (Config, error) {
 	cfg.WatchedContracts = cleanContractList(cfg.WatchedContracts)
 	cfg.RPCURLS = cleanContractList(cfg.RPCURLS)
 	cfg.CORSAllowedOrigins = cleanOrigins(cfg.CORSAllowedOrigins)
-	if cfg.StartLedgerRaw != "" {
-		if n, err := ParseStartLedger(cfg.StartLedgerRaw); err == nil {
-			cfg.StartLedger = n
-		}
+	cfg.Network = strings.ToLower(strings.TrimSpace(cfg.Network))
+	if _, ok := NetworkConfigFor(cfg.Network); !ok {
+		return Config{}, fmt.Errorf("NETWORK must be one of testnet, mainnet, futurenet; got %q", cfg.Network)
+	}
+	if _, explicitlySet := os.LookupEnv("RPC_URL"); !explicitlySet && len(cfg.RPCURLS) == 0 {
+		cfg.RPCURL = networks[cfg.Network].RPCURL
 	}
 	if err := cfg.ValidateAll(); err != nil {
 		return Config{}, err
@@ -434,6 +442,12 @@ func (c Config) Validate() error {
 	}
 	if c.RetentionBatchSize <= 0 {
 		return fmt.Errorf("RETENTION_BATCH_SIZE must be positive")
+	}
+	if c.IngestPageSize == 0 {
+		return fmt.Errorf("INGEST_PAGE_SIZE must be positive")
+	}
+	if c.IngestBatchSize == 0 {
+		return fmt.Errorf("INGEST_BATCH_SIZE must be positive")
 	}
 	if c.RetentionPause < 0 {
 		return fmt.Errorf("RETENTION_PAUSE must be non-negative")
@@ -679,6 +693,7 @@ func (c Config) LoggableFields() []any {
 		dbURL = u.String()
 	}
 	return []any{
+		"network", c.Network,
 		"rpc_url", c.RPCURL,
 		"metrics_enabled", c.MetricsEnabled,
 		"rpc_max_attempts", c.RPCMaxAttempts,
