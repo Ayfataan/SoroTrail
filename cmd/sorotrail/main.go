@@ -308,7 +308,7 @@ func run() error {
 			Endpoint:        cfg.ArchiveEndpoint,
 			Region:          cfg.ArchiveRegion,
 			AccessKeyID:     cfg.ArchiveAccessKeyID,
-			SecretAccessKey:  cfg.ArchiveSecretAccessKey,
+			SecretAccessKey: cfg.ArchiveSecretAccessKey,
 			UseSSL:          cfg.ArchiveUseSSL,
 			MaxRetries:      cfg.ArchiveMaxRetries,
 			Logger:          log,
@@ -325,11 +325,11 @@ func run() error {
 	}
 
 	prn := pruner.NewWithArchiver(st, log, pruner.Options{
-		MaxAge:            cfg.RetentionMaxAge,
-		MinLedger:         cfg.RetentionMinLedger,
-		BatchSize:         cfg.RetentionBatchSize,
-		Pause:             cfg.RetentionPause,
-		Interval:          cfg.RetentionInterval,
+		MaxAge:             cfg.RetentionMaxAge,
+		MinLedger:          cfg.RetentionMinLedger,
+		BatchSize:          cfg.RetentionBatchSize,
+		Pause:              cfg.RetentionPause,
+		Interval:           cfg.RetentionInterval,
 		ArchiveBeforePrune: cfg.ArchiveBeforePrune,
 	}, arch)
 	if cfg.RetentionEnabled() {
