@@ -231,6 +231,24 @@ func (p *Postgres) ListDeliveryAttempts(ctx context.Context, subscriptionID int6
 	return attempts, nil
 }
 
+// CountDeliveryAttempts returns the total number of delivery attempts
+// recorded for a subscription, ignoring the list's limit. The same owner
+// check as ListDeliveryAttempts gates it: delivery history reveals which
+// events matched, so a tenant must not be able to count another's.
+func (p *Postgres) CountDeliveryAttempts(ctx context.Context, subscriptionID int64, owner SubscriptionOwner) (int64, error) {
+	if _, err := p.GetSubscription(ctx, subscriptionID, owner); err != nil {
+		return 0, err
+	}
+	var total int64
+	if err := p.pool.QueryRow(ctx,
+		`SELECT count(*) FROM delivery_attempts WHERE subscription_id = $1`,
+		subscriptionID,
+	).Scan(&total); err != nil {
+		return 0, fmt.Errorf("counting delivery attempts: %w", err)
+	}
+	return total, nil
+}
+
 func scanSubscriptions(rows pgx.Rows) ([]Subscription, error) {
 	var subs []Subscription
 	for rows.Next() {

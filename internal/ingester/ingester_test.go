@@ -38,6 +38,41 @@ func TestEventsIngestedTotal_SingleSuccess(t *testing.T) {
 		"counter must equal the number of events persisted in one successful write")
 }
 
+func TestWriteBatchSize(t *testing.T) {
+	tests := []struct {
+		name      string
+		batchSize uint
+		wantSizes []int
+	}{
+		{name: "default writes one batch", wantSizes: []int{5}},
+		{name: "configured size splits writes", batchSize: 2, wantSizes: []int{2, 2, 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &mockRPC{eventsResps: []rpc.GetEventsResponse{{
+				Events: []rpc.Event{
+					rpcEvent("e1", 100), rpcEvent("e2", 100), rpcEvent("e3", 100),
+					rpcEvent("e4", 100), rpcEvent("e5", 100),
+				},
+				LatestLedger: 500,
+			}}}
+			st := newMockStore()
+			ing := newTestIngester(client, st, Options{
+				StartLedger:    100,
+				PageLimit:      100,
+				WriteBatchSize: tt.batchSize,
+			})
+
+			_, err := ing.runOnce(context.Background())
+			require.NoError(t, err)
+			require.Len(t, st.upserted, len(tt.wantSizes))
+			for i, wantSize := range tt.wantSizes {
+				assert.Len(t, st.upserted[i], wantSize)
+			}
+		})
+	}
+}
+
 // TestSetIngestionLag covers the #237 gauge: it must be the difference
 // between the RPC chain head and the last ingested ledger, and a no-op
 // whenever either side is unknown (≤ 0).
@@ -474,6 +509,63 @@ func TestPagination_ErrorMidChainAborts(t *testing.T) {
 	assert.Contains(t, err.Error(), "boom")
 }
 
+// TestReingestRange_ToleratesShortPages covers reingestBatch pagination
+// over a closed ledger range. Stopping on a short-but-cursored page would
+// be worse than slow here: ReplaceEventsInRange deletes every stored row
+// in [from, to] that the re-fetch didn't return, so an early stop deletes
+// events that were never replaced.
+func TestReingestRange_ToleratesShortPages(t *testing.T) {
+	tests := []struct {
+		name       string
+		pages      map[string]rpc.GetEventsResponse
+		wantCalls  int
+		wantEvents []string
+	}{
+		{
+			name: "short page without cursor ends the range",
+			pages: map[string]rpc.GetEventsResponse{
+				"": {Events: []rpc.Event{rpcEvent("e1", 100)}, LatestLedger: 500},
+			},
+			wantCalls:  1,
+			wantEvents: []string{"e1"},
+		},
+		{
+			name: "short page with cursor keeps paging",
+			pages: map[string]rpc.GetEventsResponse{
+				"":   {Events: []rpc.Event{rpcEvent("e1", 100)}, LatestLedger: 500, Cursor: "c1"},
+				"c1": {Events: []rpc.Event{rpcEvent("e2", 150)}, LatestLedger: 500},
+			},
+			wantCalls:  2,
+			wantEvents: []string{"e1", "e2"},
+		},
+		{
+			name: "non-advancing cursor stops instead of spinning",
+			pages: map[string]rpc.GetEventsResponse{
+				"":   {Events: []rpc.Event{rpcEvent("e1", 100)}, LatestLedger: 500, Cursor: "c1"},
+				"c1": {Events: []rpc.Event{rpcEvent("e2", 150)}, LatestLedger: 500, Cursor: "c1"},
+			},
+			wantCalls:  2,
+			wantEvents: []string{"e1", "e2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newScriptedRPC(tt.pages)
+			st := newMockStore()
+			ing := newTestIngester(client, st, Options{PageLimit: 10})
+
+			n, err := ing.ReingestRange(context.Background(), nil, 100, 200)
+			require.NoError(t, err)
+			assert.Len(t, tt.wantEvents, n)
+			require.Len(t, client.calls, tt.wantCalls)
+			for _, id := range tt.wantEvents {
+				assert.Contains(t, st.events, id)
+			}
+		})
+	}
+}
+
 // paginationCursor extracts the cursor from a GetEvents request, or
 // returns "" when pagination is unset (cold start or first call).
 func paginationCursor(req rpc.GetEventsRequest) string {
@@ -481,6 +573,186 @@ func paginationCursor(req rpc.GetEventsRequest) string {
 		return ""
 	}
 	return req.Pagination.Cursor
+}
+
+// TestWindowSweep_ToleratesShortPages covers the sweepBatch pagination
+// contract: a page shorter than the requested limit only terminates the
+// batch when it carries NO top-level cursor. An RPC that returns fewer
+// results than requested while more data remains (internal caps,
+// filtering, load shedding) must be paged to completion — stopping early
+// would let windowSweep advance the frontier past unfetched events and
+// lose them permanently.
+func TestWindowSweep_ToleratesShortPages(t *testing.T) {
+	// Chain head 200 bounds every window at [start, 200], so any event
+	// at ledger ≤ 200 is inside the swept range and must be fetched.
+	const latest = uint32(200)
+
+	tests := []struct {
+		name string
+		// pages maps the inbound request cursor to the response, mirroring
+		// how the ingester threads cursors between pages.
+		pages map[string]rpc.GetEventsResponse
+		// wantCalls is the exact number of GetEvents requests the sweep
+		// may issue; a larger number means the loop spun (or stopped
+		// early when too small).
+		wantCalls int
+		// wantEvents is the set of event IDs that must land in the store.
+		wantEvents []string
+	}{
+		{
+			name: "short page without cursor ends the batch",
+			pages: map[string]rpc.GetEventsResponse{
+				"": {Events: []rpc.Event{rpcEvent("e1", 100)}, LatestLedger: latest},
+			},
+			wantCalls:  1,
+			wantEvents: []string{"e1"},
+		},
+		{
+			name: "short page with cursor keeps paging",
+			pages: map[string]rpc.GetEventsResponse{
+				"":   {Events: []rpc.Event{rpcEvent("e1", 100)}, LatestLedger: latest, Cursor: "c1"},
+				"c1": {Events: []rpc.Event{rpcEvent("e2", 150)}, LatestLedger: latest},
+			},
+			wantCalls:  2,
+			wantEvents: []string{"e1", "e2"},
+		},
+		{
+			name: "several consecutive short pages drain fully",
+			pages: map[string]rpc.GetEventsResponse{
+				"":   {Events: []rpc.Event{rpcEvent("e1", 100)}, LatestLedger: latest, Cursor: "c1"},
+				"c1": {Events: []rpc.Event{rpcEvent("e2", 120)}, LatestLedger: latest, Cursor: "c2"},
+				"c2": {Events: []rpc.Event{rpcEvent("e3", 140)}, LatestLedger: latest},
+			},
+			wantCalls:  3,
+			wantEvents: []string{"e1", "e2", "e3"},
+		},
+		{
+			name: "non-advancing cursor stops instead of spinning",
+			pages: map[string]rpc.GetEventsResponse{
+				"":   {Events: []rpc.Event{rpcEvent("e1", 100)}, LatestLedger: latest, Cursor: "c1"},
+				"c1": {Events: []rpc.Event{rpcEvent("e2", 150)}, LatestLedger: latest, Cursor: "c1"},
+			},
+			wantCalls:  2,
+			wantEvents: []string{"e1", "e2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newScriptedRPC(tt.pages)
+			client.health = rpc.Health{Status: "healthy", LatestLedger: latest, OldestLedger: 10}
+			st := newMockStore()
+			ing := newTestIngester(client, st, Options{StartLedger: 100, PageLimit: 10})
+
+			caughtUp, err := ing.windowSweep(context.Background(), 100,
+				[][]rpc.EventFilter{{{Type: "contract"}}})
+			require.NoError(t, err)
+			assert.True(t, caughtUp, "window reaches the chain head")
+
+			require.Len(t, client.calls, tt.wantCalls)
+			for _, id := range tt.wantEvents {
+				assert.Contains(t, st.events, id)
+			}
+
+			// Whatever the paging shape, a completed window must advance
+			// the frontier to the window end and never persist an internal
+			// batch cursor as global state.
+			state, err := st.GetIngestionState(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, int64(latest)-1, state.LastIngestedLedger)
+			assert.Empty(t, state.LastCursor)
+		})
+	}
+}
+
+// TestWindowSweep_ShortPageWithoutCursorDoesNotAdvanceFrontier pins the
+// failure mode this tolerance exists to prevent: had the short-but-
+// cursored page been treated as terminal, e2 would never have been fetched
+// while the frontier still moved past it.
+func TestWindowSweep_ShortPageWithoutCursorDoesNotAdvanceFrontier(t *testing.T) {
+	client := newScriptedRPC(map[string]rpc.GetEventsResponse{
+		"":   {Events: []rpc.Event{rpcEvent("e1", 100)}, LatestLedger: 500, Cursor: "c1"},
+		"c1": {Events: []rpc.Event{rpcEvent("e2", 400)}, LatestLedger: 500},
+	})
+	client.health = rpc.Health{Status: "healthy", LatestLedger: 500, OldestLedger: 10}
+	st := newMockStore()
+	ing := newTestIngester(client, st, Options{StartLedger: 100, PageLimit: 100})
+
+	_, err := ing.windowSweep(context.Background(), 100,
+		[][]rpc.EventFilter{{{Type: "contract"}}})
+	require.NoError(t, err)
+
+	assert.Contains(t, st.events, "e2",
+		"the event behind the short page's cursor must be ingested")
+}
+
+// TestNextState_PageShapes documents the singlePage/nextState contract for
+// every page shape the RPC can return. Unlike the sweep paths, a short
+// page there is safe to call "caught up": the cursor (top-level or the
+// per-event fallback) is persisted either way, so the next cycle resumes
+// from exactly where the page ended.
+func TestNextState_PageShapes(t *testing.T) {
+	tests := []struct {
+		name         string
+		resp         rpc.GetEventsResponse
+		limit        uint
+		wantCaughtUp bool
+		wantCursor   string
+		wantLedger   int64
+	}{
+		{
+			name: "full page is not caught up",
+			resp: rpc.GetEventsResponse{
+				Events:       []rpc.Event{rpcEvent("e1", 100), rpcEvent("e2", 101)},
+				LatestLedger: 500,
+				Cursor:       "c-e2",
+			},
+			limit:        2,
+			wantCaughtUp: false,
+			wantCursor:   "c-e2",
+			wantLedger:   101,
+		},
+		{
+			name: "short page with cursor is resumable",
+			resp: rpc.GetEventsResponse{
+				Events:       []rpc.Event{rpcEvent("e1", 100)},
+				LatestLedger: 500,
+				Cursor:       "c-e1",
+			},
+			limit:        100,
+			wantCaughtUp: true,
+			wantCursor:   "c-e1",
+			wantLedger:   100,
+		},
+		{
+			name: "short page without cursor falls back to the per-event token",
+			resp: rpc.GetEventsResponse{
+				Events:       []rpc.Event{rpcEvent("e1", 100)},
+				LatestLedger: 500,
+			},
+			limit:        100,
+			wantCaughtUp: true,
+			wantCursor:   "e1",
+			wantLedger:   100,
+		},
+		{
+			name:         "empty page parks the frontier below the chain head",
+			resp:         rpc.GetEventsResponse{LatestLedger: 500},
+			limit:        100,
+			wantCaughtUp: true,
+			wantCursor:   "",
+			wantLedger:   499,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state, caughtUp := nextState(tt.resp, tt.limit)
+			assert.Equal(t, tt.wantCaughtUp, caughtUp)
+			assert.Equal(t, tt.wantCursor, state.LastCursor)
+			assert.Equal(t, tt.wantLedger, state.LastIngestedLedger)
+		})
+	}
 }
 
 func TestPagination_LegacyPagingTokenFallback(t *testing.T) {

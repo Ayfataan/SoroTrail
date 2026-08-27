@@ -49,6 +49,9 @@ type scopedStore struct {
 	// assert the boundary was propagated and not merely that the answer
 	// happened to look right.
 	seenScopes []store.Scope
+	// statsCalls counts Store.Stats calls so a test can observe the /stats
+	// cache short-circuiting the aggregation on repeat hits.
+	statsCalls int
 }
 
 func (s *scopedStore) record(sc store.Scope) { s.seenScopes = append(s.seenScopes, sc) }
@@ -116,6 +119,7 @@ func (s *scopedStore) EventExists(_ context.Context, id string, sc store.Scope) 
 
 func (s *scopedStore) Stats(_ context.Context, sc store.Scope) (store.Stats, error) {
 	s.record(sc)
+	s.statsCalls++
 	visible := s.visible(sc)
 	contracts := map[string]struct{}{}
 	for _, e := range visible {
@@ -139,6 +143,7 @@ type fakeTenants struct {
 	tenants map[int64]store.Tenant
 	grants  map[int64][]string
 	keys    map[string]keyRecord
+	watched map[int64][]string
 
 	usage map[int64][]store.TenantUsage
 }
@@ -154,6 +159,7 @@ func newFakeTenants() *fakeTenants {
 		tenants: map[int64]store.Tenant{},
 		grants:  map[int64][]string{},
 		keys:    map[string]keyRecord{},
+		watched: map[int64][]string{},
 		usage:   map[int64][]store.TenantUsage{},
 	}
 }
@@ -197,6 +203,40 @@ func (f *fakeTenants) GetTenant(_ context.Context, id int64) (store.Tenant, erro
 func (f *fakeTenants) ListGrants(_ context.Context, id int64) ([]string, error) {
 	return f.grants[id], nil
 }
+func (f *fakeTenants) ListTenants(_ context.Context) ([]store.Tenant, error) {
+	out := make([]store.Tenant, 0, len(f.tenants))
+	for _, t := range f.tenants {
+		out = append(out, t)
+	}
+	return out, nil
+}
+func (f *fakeTenants) ListAPIKeys(_ context.Context, tenantID int64) ([]store.APIKey, error) {
+	var out []store.APIKey
+	for _, rec := range f.keys {
+		if rec.tenantID == tenantID {
+			out = append(out, store.APIKey{ID: rec.id, TenantID: rec.tenantID})
+		}
+	}
+	return out, nil
+}
+func (f *fakeTenants) ListTenantWatchedContracts(_ context.Context, tenantID int64) ([]string, error) {
+	return f.watched[tenantID], nil
+}
+func (f *fakeTenants) AddTenantWatchedContract(_ context.Context, t store.Tenant, contractID string, _ int) error {
+	f.watched[t.ID] = append(f.watched[t.ID], contractID)
+	return nil
+}
+func (f *fakeTenants) RemoveTenantWatchedContract(_ context.Context, tenantID int64, contractID string) error {
+	list := f.watched[tenantID]
+	out := list[:0]
+	for _, c := range list {
+		if c != contractID {
+			out = append(out, c)
+		}
+	}
+	f.watched[tenantID] = out
+	return nil
+}
 func (f *fakeTenants) TouchAPIKey(context.Context, int64) error { return nil }
 func (f *fakeTenants) AddUsage(_ context.Context, _ time.Time, deltas map[int64]store.UsageDelta) error {
 	for id, d := range deltas {
@@ -222,9 +262,19 @@ type tenantFixture struct {
 	keyNone string // authenticated, granted nothing
 	keyAdmin,
 	keyWildcard string
+	// statsTTL, when > 0, enables the /stats per-scope cache on the served
+	// router (0 keeps the default no-cache behavior for the bulk of tests).
+	statsTTL time.Duration
 }
 
 func newTenantFixture(t *testing.T) *tenantFixture {
+	t.Helper()
+	return newTenantFixtureWithStatsTTL(t, 0)
+}
+
+// newTenantFixtureWithStatsTTL builds the fixture and, when ttl > 0, enables
+// the /stats per-scope cache so a test can exercise caching end to end.
+func newTenantFixtureWithStatsTTL(t *testing.T, ttl time.Duration) *tenantFixture {
 	t.Helper()
 	// Package-level caching flags are process-wide; reset so tests do not
 	// leak state into one another.
@@ -239,7 +289,7 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 	}}
 	tenants := newFakeTenants()
 
-	f := &tenantFixture{st: st, tenants: tenants}
+	f := &tenantFixture{st: st, tenants: tenants, statsTTL: ttl}
 	f.keyA = tenants.addTenant(t, store.Tenant{ID: 1, Name: "a", Enabled: true}, contractA)
 	f.keyB = tenants.addTenant(t, store.Tenant{ID: 2, Name: "b", Enabled: true}, contractB)
 	f.keyNone = tenants.addTenant(t, store.Tenant{ID: 3, Name: "none", Enabled: true})
@@ -249,6 +299,7 @@ func newTenantFixture(t *testing.T) *tenantFixture {
 	srv := New(st, &stubRPC{health: rpc.Health{Status: "healthy"}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)), "test-key").
 		WithMultiTenancy(tenants, MultiTenantOptions{MaxWatchedContracts: 10})
+	srv.SetStatsTTL(ttl)
 	f.srv = srv.Router()
 	return f
 }
@@ -450,6 +501,33 @@ func TestStatsIsScoped(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &statsWild))
 	assert.Equal(t, int64(4), statsWild.TotalEvents, "a wildcard tenant still sees the whole store")
+}
+
+// TestStatsCache_ScopeIsolated verifies the /stats cache keys by tenant scope
+// so one tenant's cached numbers can never be served to another, while repeat
+// calls from the same tenant do hit the cache.
+func TestStatsCache_ScopeIsolated(t *testing.T) {
+	f := newTenantFixtureWithStatsTTL(t, time.Minute)
+
+	asStats := func(key string) store.Stats {
+		rec := f.get(t, key, "/stats")
+		require.Equal(t, http.StatusOK, rec.Code)
+		var s store.Stats
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &s))
+		return s
+	}
+
+	// Tenant A's second call hits the cache: the store is consulted once for A.
+	statsA1 := asStats(f.keyA)
+	statsA2 := asStats(f.keyA)
+	require.Equal(t, 1, f.st.statsCalls, "tenant A's repeat calls within TTL must be served from cache")
+	assert.Equal(t, statsA1, statsA2)
+
+	// Tenant B is cache-isolated: its aggregate is counted separately.
+	statsB := asStats(f.keyB)
+	require.Equal(t, 2, f.st.statsCalls, "tenant B must trigger its own store aggregation")
+	assert.Equal(t, int64(1), statsB.TotalEvents, "B sees only its own contract")
+	assert.NotEqual(t, statsA1, statsB, "A and B must never share a cached response")
 }
 
 // A tenant with no grants is authenticated but entitled to nothing.
@@ -932,6 +1010,13 @@ func (s *subStore) ListDeliveryAttempts(ctx context.Context, id int64, _ int, ow
 	return []store.DeliveryAttempt{{SubscriptionID: id}}, nil
 }
 
+func (s *subStore) CountDeliveryAttempts(ctx context.Context, id int64, owner store.SubscriptionOwner) (int64, error) {
+	if _, err := s.GetSubscription(ctx, id, owner); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
 // newSubFixture is newTenantFixture with a subscription-aware store.
 func newSubFixture(t *testing.T) (*tenantFixture, *subStore) {
 	t.Helper()
@@ -1136,4 +1221,39 @@ func TestSubscriptionOwnerZeroValueDenies(t *testing.T) {
 		"the zero owner restricts to tenant 0, which no bigserial row can be")
 	assert.True(t, store.AllSubscriptions().IsAll())
 	assert.Equal(t, int64(7), store.OwnedBy(7).TenantID())
+}
+
+// TestTenantListEndpoints_TotalCountHeader covers the X-Total-Count
+// contract on the admin and self-service list endpoints. All of them
+// return the full list on one page, so the total is the page length.
+func TestTenantListEndpoints_TotalCountHeader(t *testing.T) {
+	f := newTenantFixture(t)
+
+	t.Run("admin tenant list reports the number of tenants", func(t *testing.T) {
+		rec := f.get(t, f.keyAdmin, "/admin/tenants")
+		require.Equal(t, http.StatusOK, rec.Code, bodyString(t, rec))
+		assert.Equal(t, "5", rec.Header().Get("X-Total-Count"))
+	})
+
+	t.Run("admin grant list reports the number of grants", func(t *testing.T) {
+		rec := f.get(t, f.keyAdmin, "/admin/tenants/1/grants")
+		require.Equal(t, http.StatusOK, rec.Code, bodyString(t, rec))
+		assert.Equal(t, "1", rec.Header().Get("X-Total-Count"),
+			"tenant 1 holds exactly one grant")
+	})
+
+	t.Run("admin key list reports the number of keys", func(t *testing.T) {
+		rec := f.get(t, f.keyAdmin, "/admin/tenants/1/keys")
+		require.Equal(t, http.StatusOK, rec.Code, bodyString(t, rec))
+		assert.Equal(t, "1", rec.Header().Get("X-Total-Count"),
+			"addTenant mints exactly one key per tenant")
+	})
+
+	t.Run("tenant watch list reports the number of watched contracts", func(t *testing.T) {
+		// Seed two claims directly, then read them back through the API.
+		f.tenants.watched[1] = []string{contractA, contractB}
+		rec := f.get(t, f.keyA, "/tenant/watch")
+		require.Equal(t, http.StatusOK, rec.Code, bodyString(t, rec))
+		assert.Equal(t, "2", rec.Header().Get("X-Total-Count"))
+	})
 }

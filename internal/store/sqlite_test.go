@@ -80,3 +80,35 @@ func TestSQLite_OpenExisting(t *testing.T) {
 		t.Fatalf("expected empty next cursor, got %q", next)
 	}
 }
+
+// TestSQLite_MigrationsCreateTxHashIndex verifies the sqlite migration
+// series lands idx_events_tx_hash, mirroring the Postgres-side index from
+// 0015_add_tx_hash_index so tx-hash lookups don't scan the whole events
+// table on either backend.
+func TestSQLite_MigrationsCreateTxHashIndex(t *testing.T) {
+	f, err := os.CreateTemp("", "sorotrail-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := f.Name()
+	f.Close()
+	defer os.Remove(path)
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("opening sqlite: %v", err)
+	}
+	defer db.Close()
+
+	if err := Migrate("sqlite:" + path); err != nil {
+		t.Fatalf("migrating sqlite: %v", err)
+	}
+
+	var name string
+	err = db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_tx_hash'`,
+	).Scan(&name)
+	if err != nil {
+		t.Fatalf("idx_events_tx_hash should exist after migrations: %v", err)
+	}
+}

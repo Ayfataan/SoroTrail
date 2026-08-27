@@ -106,6 +106,9 @@ func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, errors.New("listing tenants failed"))
 		return
 	}
+	// The whole list is returned on one page, so the total is just the
+	// page size; no separate count query is needed.
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", len(tenants)))
 	writeCacheHeaders(w, cacheNoStore, 0, "")
 	writeJSON(w, http.StatusOK, map[string]any{"tenants": tenants})
 }
@@ -254,6 +257,9 @@ func (s *Server) writeGrants(w http.ResponseWriter, r *http.Request, tenantID in
 		writeError(w, http.StatusInternalServerError, errors.New("listing grants failed"))
 		return
 	}
+	// The whole list is returned on one page, so the total is just the
+	// page size; no separate count query is needed.
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", len(grants)))
 	writeCacheHeaders(w, cacheNoStore, 0, "")
 	writeJSON(w, http.StatusOK, map[string]any{"contract_ids": grants})
 }
@@ -301,6 +307,9 @@ func (s *Server) handleListTenantKeys(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, errors.New("listing api keys failed"))
 		return
 	}
+	// The whole list is returned on one page, so the total is just the
+	// page size; no separate count query is needed.
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", len(keys)))
 	writeCacheHeaders(w, cacheNoStore, 0, "")
 	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
 }
@@ -444,6 +453,9 @@ func (s *Server) writeOwnWatched(w http.ResponseWriter, r *http.Request, tenantI
 		writeError(w, http.StatusInternalServerError, errors.New("listing watched contracts failed"))
 		return
 	}
+	// The whole list is returned on one page, so the total is just the
+	// page size; no separate count query is needed.
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", len(watched)))
 	writeCacheHeaders(w, cacheNoStore, 0, "")
 	writeJSON(w, http.StatusOK, map[string]any{"contract_ids": watched})
 }

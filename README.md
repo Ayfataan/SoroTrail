@@ -84,6 +84,7 @@ All configuration comes from environment variables (see
 
 Variable	Default	Description
 RPC_URL	https://soroban-testnet.stellar.org	Stellar RPC endpoint (JSON-RPC 2.0). Point at a provider URL for mainnet.
+RPC_RATE_LIMIT	10	Single-provider request rate limit (requests/second). Default matches the public endpoint limit — raising it against the public RPC will get you throttled; set higher only for paid plans or self-hosted RPCs. On 429 the client honors Retry-After (seconds or HTTP-date, capped at 60s).
 DATABASE_URL	— (required)	Postgres connection string.
 POLL_INTERVAL	5s	Sleep between polls once caught up.
 HTTP_ADDR	:8080	API listen address.
@@ -114,8 +115,11 @@ If the indexer is down long enough that its resume point falls out of the
 RPC's retention window, it logs a warning and skips ahead to the oldest
 retained ledger (the gap is unrecoverable from RPC — that's the problem this
 project exists to prevent).
-Requests are rate-limited (~10/s, matching public endpoint limits) and
-errors are retried with jittered exponential backoff.
+Requests are rate-limited (10/s by default, matching public endpoint limits —
+raise it via `RPC_RATE_LIMIT` only for paid plans or self-hosted RPCs) and
+errors are retried with jittered exponential backoff; when the provider
+responds 429 with a `Retry-After` header, that hint (seconds or HTTP-date,
+capped at 60s) is honored before falling back to computed backoff.
 Topics/values are stored as JSON. When the RPC supports xdrFormat: "json"
 its decoding is used verbatim; otherwise the base64 XDR is decoded locally
 into shapes like {"symbol":"transfer"}, {"u64":42}, {"i128":"-1000"},
@@ -134,6 +138,11 @@ All configuration comes from environment variables (see `.env.example`):
 | Variable | Default | Description |
 | --- | --- | --- |
 | `RPC_URL` | `https://soroban-testnet.stellar.org` | Stellar RPC endpoint (JSON-RPC 2.0). Point at a provider URL for mainnet. |
+| `RPC_RATE_LIMIT` | `10` | Request rate limit (`requests/second`) for the single-provider client. The default of 10 matches the public endpoint limit — raising it against the public RPC will get you throttled; set it higher only for paid provider plans or self-hosted RPCs whose allowance permits it. On HTTP 429 the client honors the provider's `Retry-After` header (delta-seconds or HTTP-date, capped at 60s) before falling back to exponential backoff. Ignored when `RPC_URLS` is set. |
+| `RPC_MAX_ATTEMPTS` | `3` | Maximum attempts (including the first) per failing RPC call before the error surfaces. |
+| `RPC_BASE_BACKOFF` | `500ms` | Initial retry backoff duration; doubles on each subsequent retry. |
+| `RPC_MAX_BACKOFF` | `30s` | Upper bound on the computed retry backoff. |
+| `RPC_JITTER` | `true` | Randomize each computed backoff to [0.5×, 1.5×) so concurrent retries don't thundering-herd the endpoint. Never applied to a provider's `Retry-After` hint. |
 | `RPC_URLS` | unset | Comma-separated, priority-ordered list of Stellar RPC endpoints. When set, `RPC_URL` is ignored and the multi-provider failover client is used. List order is priority: index 0 is tried first. |
 | `RPC_RATE_LIMIT_RPS` | `10` | Per-provider request rate limit (`requests/second`) applied to each RPC endpoint independently. Only used when `RPC_URLS` is set. |
 | `HORIZON_URL` | `https://horizon-testnet.stellar.org` | Stellar Horizon REST endpoint used by `sorotrail backfill` only. Live ingestion does not touch Horizon. |
@@ -144,6 +153,7 @@ All configuration comes from environment variables (see `.env.example`):
 | `WATCHED_CONTRACTS` | empty | Comma-separated contract IDs (`C...`). Empty = ingest **all** contract events. Each watched contract tracks its own resume cursor; adding a contract automatically triggers a backfill from `latest − RETENTION_LEDGERS` (clamped to RPC retention), independent of other contracts. |
 | `START_LEDGER` | unset | Force cold-start ingestion from this ledger. |
 | `RETENTION_LEDGERS` | `17280` | Cold-start reach-back in ledgers (~24h at 5s/ledger). |
+| `PARTITION_LEDGER_SPAN` | `120960` | Ledger range per events-table partition (~7 days at 5s/ledger). Partitions are created automatically on migration and at ingest time. |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
 | `LOG_FORMAT` | `text` | `text` \| `json`. JSON emits one JSON object per line, compatible with Loki, CloudWatch, and ELK. |
 | `API_QUERY_TIMEOUT` | `25s` | Per-request database timeout for API-originated store reads. The timeout is enforced in-process and mirrored to Postgres via `statement_timeout`. |
@@ -157,12 +167,14 @@ All configuration comes from environment variables (see `.env.example`):
 | `AUDIT_MAX_REPAIR_ATTEMPTS` | `3` | Repair iterations before a finding is kept open as `unrecoverable`. |
 | `AUDIT_FINDING_MAX_LEDGERS` | `100` | Largest range a single finding is allowed to span. |
 | `API_MAX_LIMIT` | `500` | Maximum page size accepted for list endpoints (`/events`, `/subscriptions/{id}/deliveries`). Values above this are rejected with 400. |
+| `STATS_CACHE_TTL` | `5s` | How long `GET /stats` results are served from the per-scope cache before being recomputed, short-circuiting the aggregation on busy endpoints. `0` disables caching. |
 | `API_KEY` | empty | Required to use the runtime `/watched-contracts` surface; empty means every request there is rejected with 503. This is a placeholder until #17 (real auth) lands — at that point `API_KEY` will be replaced. |
 | `RATE_LIMIT_RPS` | unset | Per-client HTTP request rate limit (`requests/second`). Both `RATE_LIMIT_RPS` and `RATE_LIMIT_BURST` must be set together; otherwise no rate limiting is applied. |
 | `RATE_LIMIT_BURST` | unset | Maximum instantaneous burst size for the rate limiter. Pairs with `RATE_LIMIT_RPS`. |
 | `RATE_LIMIT_TRUSTED_PROXY` | `false` | Honor `X-Forwarded-For` for client IP detection. Must only be enabled behind a proxy you trust to strip/rewrite the header — clients control `X-Forwarded-For` themselves, so enabling it on an Internet-facing surface lets any caller pick their own rate-limit key. |
 | `CACHE_PRIVATE` | `false` | Flip cacheable responses from `Cache-Control: public` to `private`. Set this when the deployment serves per-user data behind an auth layer (see [Caching](#caching)). |
-| `CORS_ALLOWED_ORIGINS` | unset | Comma-separated browser origins allowed to call the API. `*` allows any origin; otherwise each entry is an explicit origin (`scheme://host`). Unset = CORS disabled, no CORS headers emitted. |
+| `CORS_ALLOWED_ORIGINS` | unset | Comma-separated browser origins allowed to call the API. `*` allows any origin; otherwise each entry is an explicit origin (`scheme://host`). Unset = CORS disabled, no CORS headers emitted. Preflight `OPTIONS` is answered automatically; invalid entries (e.g. `null`, origins with a path) fail startup. |
+| `CORS_EXPOSED_HEADERS` | `X-Request-ID` | Response headers browser JavaScript may read on allowed origins via `Access-Control-Expose-Headers`. The API stamps every response with `X-Request-ID`; empty suppresses the header entirely. |
 | `RATE_LIMIT_RPS` | unset | Per-client HTTP request rate limit (`requests/second`). Both `RATE_LIMIT_RPS` and `RATE_LIMIT_BURST` must be set together; otherwise no rate limiting is applied. |
 | `RATE_LIMIT_BURST` | unset | Maximum instantaneous burst size for the rate limiter. Pairs with `RATE_LIMIT_RPS`. |
 | `RATE_LIMIT_TRUSTED_PROXY` | `false` | Honor `X-Forwarded-For` for client IP detection. Must only be enabled behind a proxy you trust to strip/rewrite the header — clients control `X-Forwarded-For` themselves, so enabling it on an Internet-facing surface lets any caller pick their own rate-limit key. |
@@ -243,8 +255,10 @@ should ensure the shortest retention window is ≥ the ingester's
   RPC's retention window, it logs a warning and skips ahead to the oldest
   retained ledger (the gap is unrecoverable from RPC — that's the problem this
   project exists to prevent).
-- Requests are rate-limited (~10/s, matching public endpoint limits) and
-  errors are retried with jittered exponential backoff.
+- Requests are rate-limited (10/s by default via `RPC_RATE_LIMIT` — the public
+  endpoint ceiling; raise it only for paid plans or self-hosted RPCs) and
+  errors are retried with jittered exponential backoff. A 429 carrying
+  `Retry-After` is honored (capped at 60s) ahead of computed backoff.
 - **Ingest-lag alarm**: every poll cycle compares the chain head (fetched via
   `getLatestLedger`) to the last ingested ledger. When the gap exceeds
   `LAG_WARN_LEDGERS` (default `100`), a single WARN-level structured log is
@@ -343,6 +357,7 @@ All configuration comes from environment variables (see
 
 Variable	Default	Description
 RPC_URL	https://soroban-testnet.stellar.org	Stellar RPC endpoint (JSON-RPC 2.0). Point at a provider URL for mainnet.
+RPC_RATE_LIMIT	10	Single-provider request rate limit (requests/second). Default matches the public endpoint limit — raising it against the public RPC will get you throttled; set higher only for paid plans or self-hosted RPCs. On 429 the client honors Retry-After (seconds or HTTP-date, capped at 60s).
 DATABASE_URL	— (required)	Postgres connection string.
 POLL_INTERVAL	5s	Sleep between polls once caught up.
 HTTP_ADDR	:8080	API listen address.
@@ -373,8 +388,11 @@ If the indexer is down long enough that its resume point falls out of the
 RPC's retention window, it logs a warning and skips ahead to the oldest
 retained ledger (the gap is unrecoverable from RPC — that's the problem this
 project exists to prevent).
-Requests are rate-limited (~10/s, matching public endpoint limits) and
-errors are retried with jittered exponential backoff.
+Requests are rate-limited (10/s by default, matching public endpoint limits —
+raise it via `RPC_RATE_LIMIT` only for paid plans or self-hosted RPCs) and
+errors are retried with jittered exponential backoff; when the provider
+responds 429 with a `Retry-After` header, that hint (seconds or HTTP-date,
+capped at 60s) is honored before falling back to computed backoff.
 Topics/values are stored as JSON. When the RPC supports xdrFormat: "json"
 its decoding is used verbatim; otherwise the base64 XDR is decoded locally
 into shapes like {"symbol":"transfer"}, {"u64":42}, {"i128":"-1000"},
@@ -766,6 +784,11 @@ memory usage stays bounded regardless of the ledger span.
   total request rate at ~10 req/s regardless, so the parallelism only
   helps when the RPC has headroom past the public ceiling. The
   single-batch path (`<=25` watched contracts) is unchanged.
+  `SWEEP_CONCURRENCY` also bounds database backpressure: each fanned-out
+  goroutine writes its page before fetching its next one, so it never
+  runs more concurrent `UpsertEvents` calls than this limit — a slow
+  store lengthens each goroutine's cycle rather than piling up unbounded
+  concurrent writes.
 - **Reorg detection** (`REORG_CONFIRMATION_WINDOW`, default `64`): after
   every successful ingest cycle the Run loop re-fetches the range
   `[frontier - REORG_CONFIRMATION_WINDOW, frontier - 1]` and replaces
@@ -1638,6 +1661,24 @@ document that status on that route. Companion tests check the 429 documents
 its `Retry-After` header, the authentication failures name the scheme a
 caller has to satisfy, and every error body reaches the one shared
 `ErrorResponse` envelope through a `$ref` instead of restating it per path.
+
+### Parameter validation
+
+A parameter documented with the wrong bound is worse than one documented with
+no bound at all: a generated client refuses a legal request before it is ever
+sent. The declared constraints are therefore checked against the running
+handlers rather than reviewed by eye:
+
+```sh
+go test ./internal/api/ -run TestDeclaredBoundsMatchTheHandlers -v
+```
+
+The test reads each parameter's `minimum`, `maximum`, `maxLength` and `enum`
+out of the shipped spec and drives the real router at those edges, requiring
+the handler to accept the boundary value and reject the one immediately
+outside it. Companion tests check that each enum is exactly the set the
+parsing code allows, that required parameters really are refused when absent,
+and that no parameter is documented which the handler discards.
 
 ## License
 

@@ -959,26 +959,6 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request, filter stor
 	envelope := r.URL.Query().Get("envelope") == "true"
 	writeCacheHeaders(w, policy, immutableMaxAge, etag)
 
-	// RFC 5988 pagination links: when the store reports a next-page
-	// cursor, hand clients ready-made URLs instead of making them
-	// reassemble one. All original query params are preserved so pages
-	// keep the caller's filter; a request that arrived mid-pagination
-	// also advertises the way back to the first page via rel="prev".
-	if cursor != "" {
-		var links []string
-		if r.URL.Query().Get("cursor") != "" {
-			first := r.URL.Query()
-			first.Del("cursor")
-			prev := url.URL{Path: r.URL.Path, RawQuery: first.Encode()}
-			links = append(links, fmt.Sprintf("<%s>; rel=\"prev\"", prev.String()))
-		}
-		q := r.URL.Query()
-		q.Set("cursor", cursor)
-		next := url.URL{Path: r.URL.Path, RawQuery: q.Encode()}
-		links = append(links, fmt.Sprintf("<%s>; rel=\"next\"", next.String()))
-		w.Header().Set("Link", strings.Join(links, ", "))
-	}
-
 	if decoded && s.enricher != nil {
 
 		enriched := s.enricher.EnrichEvents(r.Context(), events)
@@ -1463,12 +1443,18 @@ func (s *Server) handleListContracts(w http.ResponseWriter, r *http.Request) {
 	total, cerr := s.store.CountContracts(r.Context(), f)
 	if cerr != nil {
 		loggerFromContext(r.Context()).Warn("counting contracts for X-Total-Count", "error", cerr)
-	} else if total > 0 {
+	} else {
+		// The header is set even for an empty result set: a client that
+		// reads "0" learns the endpoint is healthy and there is simply
+		// nothing to page, whereas an absent header is ambiguous.
 		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
 	}
 	if items == nil {
 		items = []store.ContractSummary{}
 	}
+	// RFC 5988 pagination links, set before the body so the client can
+	// walk pages without reassembling cursors.
+	setPaginationHeaders(w, r, cursor)
 	writeCacheHeaders(w, cacheNoCache, 0, "")
 	if r.URL.Query().Get("envelope") == "true" {
 		writeJSON(w, http.StatusOK, wrapEnvelope(items, cursor))
@@ -1519,6 +1505,19 @@ func (s *Server) handleListDeadLetters(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, errors.New("listing dead letters failed"))
 		return
 	}
+	// RFC 5988 pagination links, set before the body so the client can
+	// walk pages without reassembling cursors.
+	setPaginationHeaders(w, r, cursor)
+
+	// Total matching count (ignoring pagination) as a response header,
+	// following the events pattern exactly: a failed count is logged and
+	// the header omitted, never a failed request.
+	if total, cerr := s.store.CountDeadLetters(r.Context(), f.ContractID); cerr != nil {
+		loggerFromContext(r.Context()).Warn("counting dead letters for X-Total-Count", "error", cerr)
+	} else {
+		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
+	}
+
 	writeCacheHeaders(w, cacheNoStore, 0, "")
 	if r.URL.Query().Get("envelope") == "true" {
 		if items == nil {
@@ -1555,19 +1554,52 @@ func (s *Server) handleDeleteDeadLetter(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleStats serves the aggregate /stats response. The store aggregation and
+// RPC freshness lookup are the expensive parts, so the assembled result is
+// cached per tenant-scope for statsTTL; a request that lands within the window
+// is served from cache without touching the database. After the TTL expires
+// the next request recomputes, so values refresh automatically without a
+// background timer.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.store.Stats(r.Context(), scopeFrom(r.Context()))
-	if err != nil {
-
-		loggerFromContext(r.Context()).Error("loading stats", "error", err)
-
-		writeError(w, http.StatusInternalServerError, errors.New("loading stats failed"))
-
+	key := scopeFrom(r.Context()).Fingerprint()
+	if stats, ok := s.getStatsCache().Get(key, time.Now()); ok {
+		writeCacheHeaders(w, cacheNoStore, 0, "")
+		writeJSON(w, http.StatusOK, stats)
 		return
-
 	}
 
-	s.addStatsFreshness(r.Context(), &stats)
+	stats, err := s.assembleStats(r.Context())
+	if err != nil {
+		loggerFromContext(r.Context()).Error("loading stats", "error", err)
+		writeError(w, http.StatusInternalServerError, errors.New("loading stats failed"))
+		return
+	}
+
+	s.getStatsCache().Put(key, stats, time.Now())
+	writeCacheHeaders(w, cacheNoStore, 0, "")
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// getStatsCache returns the server's per-scope cache, building it lazily on
+// first use so a Server constructed without a configured TTL never allocates
+// one until /stats is actually hit with caching enabled.
+func (s *Server) getStatsCache() *StatsCache {
+	if s.statsCache == nil {
+		s.statsCache = newStatsCache(s.statsTTL)
+	}
+	return s.statsCache
+}
+
+// assembleStats computes the full /stats payload: the store aggregate, the
+// RPC freshness fields, and the in-memory process counters (auditor, pruner,
+// recoverer, RPC errors). Callers cache the result keyed by tenant scope.
+func (s *Server) assembleStats(ctx context.Context) (store.Stats, error) {
+	stats, err := s.store.Stats(ctx, scopeFrom(ctx))
+	if err != nil {
+		return store.Stats{}, err
+	}
+
+	s.addStatsFreshness(ctx, &stats)
 
 	stats.PanicsRecovered = s.recoverer.PanicsRecovered()
 
@@ -1618,11 +1650,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 
 	}
-
-	writeCacheHeaders(w, cacheNoStore, 0, "")
-
-	writeJSON(w, http.StatusOK, stats)
-
+	return stats, nil
 }
 
 // Watched contracts types.
@@ -1669,6 +1697,10 @@ func (s *Server) handleListWatchedChains(w http.ResponseWriter, r *http.Request)
 		return
 
 	}
+
+	// The whole watch list is returned on one page, so the total is just
+	// the page size; no separate count query is needed.
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", len(contracts)))
 
 	writeJSON(w, http.StatusOK, watchedListResponse{Contracts: contracts, Count: len(contracts)})
 
@@ -1894,6 +1926,9 @@ func (s *Server) handleAddressEvents(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
 	}
 
+	// RFC 5988 pagination links, set before the body so the client can
+	// walk pages without reassembling cursors.
+	setPaginationHeaders(w, r, cursor)
 	writeCacheHeaders(w, cacheNoCache, 0, "")
 	envelope := r.URL.Query().Get("envelope") == "true"
 	if envelope {
@@ -1983,11 +2018,14 @@ func (s *Server) addStatsFreshness(ctx context.Context, stats *store.Stats) {
 }
 
 func ingestLagLedgers(chainHead, lastIngested int64) int64 {
-	if lastIngested <= 0 {
+	if chainHead <= 0 || lastIngested <= 0 {
 		return 0
 	}
-	return chainHead - lastIngested
-
+	lag := chainHead - lastIngested
+	if lag < 0 {
+		return 0
+	}
+	return lag
 }
 
 func (s *Server) listCachePolicy(ctx context.Context, filter store.EventFilter) (cacheability, string, error) {
@@ -2194,7 +2232,7 @@ func ifNoneMatch(r *http.Request, etag string) bool {
 
 }
 
-// setPaginationHeaders emits RFC 5988 Link headers for the event list
+// setPaginationHeaders emits RFC 5988 Link headers for the paginated list
 // endpoints: rel="next" whenever the store returned a continuation cursor,
 // and rel="prev" whenever the caller supplied one. It must run before the
 // body is written, since writeJSON commits the status line.

@@ -15,6 +15,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -148,9 +149,10 @@ func TestUpsertEvents_CreatesPartitionsAndIsIdempotent(t *testing.T) {
 	assert.NotContains(t, plan, "events_20_29")
 }
 
-// TestPartialIndexForSuccessfulCalls covers migration
-// 0011_partial_index_successful_calls: the partial index over
-// (contract_id, ledger) restricted to in_successful_call = true.
+// TestPartialIndexForSuccessfulCalls covers the partial index over
+// (contract_id, ledger, id) restricted to in_successful_call = true,
+// originally introduced as (contract_id, ledger) by migration 0019 and
+// widened to include the id tiebreaker by 0022.
 //
 // It asserts two things. First, that the index exists with the expected
 // shape — indexed columns and partial predicate — by reading its
@@ -171,7 +173,7 @@ func TestPartialIndexForSuccessfulCalls(t *testing.T) {
 	var indexDef string
 	err := st.pool.QueryRow(ctx,
 		`SELECT indexdef FROM pg_indexes WHERE indexname = $1`,
-		"idx_events_contract_ledger_successful",
+		"idx_events_contract_ledger_id_successful",
 	).Scan(&indexDef)
 	require.NoError(t, err, "partial index should exist after migration")
 
@@ -180,7 +182,7 @@ func TestPartialIndexForSuccessfulCalls(t *testing.T) {
 		want string
 	}{
 		{"indexed on events", " ON "},
-		{"covers contract_id and ledger in order", "(contract_id, ledger)"},
+		{"covers contract_id and ledger in order", "(contract_id, ledger, id)"},
 		{"partial predicate scopes to successful calls", "WHERE (in_successful_call = true)"},
 	}
 	for _, tc := range defWantSubstrings {
@@ -199,7 +201,7 @@ func TestPartialIndexForSuccessfulCalls(t *testing.T) {
 		FROM pg_index i
 		JOIN pg_class c ON c.oid = i.indexrelid
 		WHERE c.relname = $1`,
-		"idx_events_contract_ledger_successful",
+		"idx_events_contract_ledger_id_successful",
 	).Scan(&isValid, &isPartial)
 	require.NoError(t, err)
 	assert.True(t, isValid, "index should be valid")
@@ -247,6 +249,55 @@ func TestPartialIndexForSuccessfulCalls(t *testing.T) {
 	require.NoError(t, rows.Err())
 	assert.Equal(t, wantSuccessful, got,
 		"query filtered to successful calls should return only successful-call rows")
+}
+
+// TestTxHashIndex covers migration 0015_add_tx_hash_index: the btree index
+// over events(tx_hash) backing tx-hash lookups (EventFilter.TxHash and
+// GetEventsByTxHash). Without it every tx_hash predicate degrades to a scan
+// across all partitions.
+//
+// Like TestPartialIndexForSuccessfulCalls, the index's existence and shape
+// are read straight from the catalog. The planner is deliberately not asked
+// whether it would pick the index: on the handful of rows a test seeds, a
+// seq scan is genuinely cheaper, so such an assertion would be flaky by
+// construction.
+func TestTxHashIndex(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	// events is partitioned, so indexdef renders the target as
+	// "ON ONLY public.events"; assert the table via the catalog's
+	// tablename column instead of a substring of the definition.
+	var tableName, indexDef string
+	err := st.pool.QueryRow(ctx,
+		`SELECT tablename, indexdef FROM pg_indexes WHERE indexname = $1`,
+		"idx_events_tx_hash",
+	).Scan(&tableName, &indexDef)
+	require.NoError(t, err, "tx_hash index should exist after migrations")
+	assert.Equal(t, "events", tableName, "index should be on the events table")
+
+	defWantSubstrings := []struct {
+		name string
+		want string
+	}{
+		{"covers tx_hash", "(tx_hash)"},
+	}
+	for _, tc := range defWantSubstrings {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Contains(t, indexDef, tc.want)
+		})
+	}
+
+	var isValid bool
+	err = st.pool.QueryRow(ctx, `
+		SELECT i.indisvalid
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = $1`,
+		"idx_events_tx_hash",
+	).Scan(&isValid)
+	require.NoError(t, err)
+	assert.True(t, isValid, "index should be valid")
 }
 
 func TestGetEvent_NotFound(t *testing.T) {
@@ -1155,4 +1206,69 @@ func TestQueryEvents_PositionalTopics(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
 	assert.Equal(t, e1.ID, got[0].ID)
+}
+
+// TestCountDeadLetters verifies that CountDeadLetters mirrors the
+// ListDeadLetters contract filter: the total is the full match set, with
+// and without the per-contract filter, and is what the X-Total-Count
+// header is built from.
+func TestCountDeadLetters(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	seed := []DeadLetterInput{
+		{EventID: "ev-a1", ContractID: contractA, Ledger: 1, Type: "contract", TxHash: "hash-1", Err: errors.New("decode")},
+		{EventID: "ev-a2", ContractID: contractA, Ledger: 2, Type: "contract", TxHash: "hash-2", Err: errors.New("decode")},
+		{EventID: "ev-b1", ContractID: contractB, Ledger: 1, Type: "contract", TxHash: "hash-3", Err: errors.New("decode")},
+	}
+	for _, in := range seed {
+		_, err := st.DeadLetterEvent(ctx, in)
+		require.NoError(t, err)
+	}
+
+	total, err := st.CountDeadLetters(ctx, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+
+	scoped, err := st.CountDeadLetters(ctx, contractA)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), scoped)
+
+	none, err := st.CountDeadLetters(ctx, contractC)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), none)
+}
+
+// TestCountDeliveryAttempts verifies that CountDeliveryAttempts totals a
+// subscription's attempts regardless of the list limit, and that it is
+// owner-gated the same way the list is: an owner that cannot see the
+// subscription gets ErrNotFound rather than a count.
+func TestCountDeliveryAttempts(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	sub, err := st.CreateSubscription(ctx, Subscription{
+		URL:     "https://example.com/hook",
+		Filters: SubscriptionFilter{ContractID: contractA},
+		Secret:  "s",
+		Enabled: true,
+	})
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		_, err := st.RecordDeliveryAttempt(ctx, DeliveryAttempt{
+			SubscriptionID: sub.ID,
+			EventID:        "ev-1",
+			Status:         DeliveryFailed,
+			Error:          "timeout",
+		})
+		require.NoError(t, err)
+	}
+
+	total, err := st.CountDeliveryAttempts(ctx, sub.ID, AllSubscriptions())
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+
+	_, err = st.CountDeliveryAttempts(ctx, sub.ID, OwnedBy(999))
+	require.ErrorIs(t, err, ErrNotFound,
+		"an owner that cannot see the subscription must not be able to count its attempts")
 }
