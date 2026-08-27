@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -350,7 +351,7 @@ func (s *Server) router() chi.Router {
 	// collector (hand-built Server) answers 503 rather than 404.
 	r.Get("/metrics", func(w http.ResponseWriter, req *http.Request) {
 		if s.metrics == nil {
-			http.Error(w, "metrics not enabled", http.StatusServiceUnavailable)
+			writeError(w, http.StatusServiceUnavailable, errors.New("metrics not enabled"))
 			return
 		}
 		s.metrics.Handler().ServeHTTP(w, req)
