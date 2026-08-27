@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 
@@ -29,11 +30,11 @@ func TestNewReturnsNilWhenDisabled(t *testing.T) {
 func TestArchiverIsNilSafe(t *testing.T) {
 	var a *Archiver
 	// All methods should be safe to call on a nil archiver.
-	archived, err := a.IsArchived(nil, 100, 200)
+	archived, err := a.IsArchived(context.Background(), 100, 200)
 	assert.NoError(t, err)
 	assert.False(t, archived)
 
-	uri, sha, err := a.ArchiveRange(nil, 100, 200)
+	uri, sha, err := a.ArchiveRange(context.Background(), 100, 200)
 	assert.NoError(t, err)
 	assert.Empty(t, uri)
 	assert.Empty(t, sha)

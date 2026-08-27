@@ -44,32 +44,32 @@ const (
 // Chunk represents one archived ledger range as persisted in the
 // archive_chunks table.
 type Chunk struct {
-	LedgerStart   int64
-	LedgerEnd     int64
-	Status        string
-	ObjectURI     string
-	RowCount      int64
+	LedgerStart    int64
+	LedgerEnd      int64
+	Status         string
+	ObjectURI      string
+	RowCount       int64
 	ManifestSHA256 string
-	Attempts      int
-	LastError     string
-	StartedAt     time.Time
-	VerifiedAt    *time.Time
-	ClosedAt      *time.Time
+	Attempts       int
+	LastError      string
+	StartedAt      time.Time
+	VerifiedAt     *time.Time
+	ClosedAt       *time.Time
 }
 
 // Manifest is the JSON structure written alongside each archive file
 // so consumers can validate integrity without parsing the NDJSON.
 type Manifest struct {
-	SchemaVersion int    `json:"schema_version"`
+	SchemaVersion int       `json:"schema_version"`
 	Chunk         ChunkInfo `json:"chunk"`
-	Producer      string `json:"producer"`
+	Producer      string    `json:"producer"`
 }
 
 // ChunkInfo holds the metadata for a single archived chunk.
 type ChunkInfo struct {
-	LedgerStart int64  `json:"ledger_start"`
-	LedgerEnd   int64  `json:"ledger_end"`
-	RowCount    int64  `json:"row_count"`
+	LedgerStart int64 `json:"ledger_start"`
+	LedgerEnd   int64 `json:"ledger_end"`
+	RowCount    int64 `json:"row_count"`
 }
 
 // Archiver handles exporting events to S3-compatible storage as
@@ -100,7 +100,7 @@ type Options struct {
 	// AccessKeyID and SecretAccessKey are explicit credentials. When
 	// both are empty the ambient credential chain is used.
 	AccessKeyID     string
-	SecretAccessKey  string
+	SecretAccessKey string
 	// UseSSL controls whether the S3 endpoint uses TLS.
 	UseSSL bool
 	// MaxRetries is the per-chunk retry budget. Default 3.

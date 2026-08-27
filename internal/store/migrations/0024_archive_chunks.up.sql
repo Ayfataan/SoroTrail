@@ -1,4 +1,4 @@
-CREATE TABLE archive_chunks (
+CREATE TABLE IF NOT EXISTS archive_chunks (
     ledger_start    BIGINT PRIMARY KEY,
     ledger_end      BIGINT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'pending',
@@ -12,4 +12,4 @@ CREATE TABLE archive_chunks (
     closed_at       TIMESTAMPTZ
 );
 
-CREATE INDEX idx_archive_chunks_status ON archive_chunks (status);
+CREATE INDEX IF NOT EXISTS idx_archive_chunks_status ON archive_chunks (status);

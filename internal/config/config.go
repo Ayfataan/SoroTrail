@@ -87,7 +87,7 @@ type Config struct {
 	ArchiveEndpoint        string `env:"ARCHIVE_ENDPOINT"`
 	ArchiveRegion          string `env:"ARCHIVE_REGION"`
 	ArchiveAccessKeyID     string `env:"ARCHIVE_ACCESS_KEY_ID"`
-	ArchiveSecretAccessKey  string `env:"ARCHIVE_SECRET_ACCESS_KEY"`
+	ArchiveSecretAccessKey string `env:"ARCHIVE_SECRET_ACCESS_KEY"`
 	ArchiveUseSSL          bool   `env:"ARCHIVE_USE_SSL"`
 	ArchiveBeforePrune     bool   `env:"ARCHIVE_BEFORE_PRUNE" envDefault:"false"`
 	ArchiveMaxRetries      int    `env:"ARCHIVE_MAX_RETRIES" envDefault:"3"`

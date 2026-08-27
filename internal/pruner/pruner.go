@@ -81,9 +81,9 @@ type Pruner struct {
 	arch  *archive.Archiver // nil when archival is disabled
 
 	// Atomics: written by Run, read by HTTP handlers via Metrics().
-	runsCompleted   atomic.Uint64
-	rowsPurged      atomic.Int64
-	archivedRanges  atomic.Int64
+	runsCompleted  atomic.Uint64
+	rowsPurged     atomic.Int64
+	archivedRanges atomic.Int64
 }
 
 // Metrics returns a value-copy snapshot of the pruner's counters.
@@ -159,7 +159,7 @@ func (p *Pruner) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-}// pruneOnce performs one full sweep: deletes batches until fewer than
+} // pruneOnce performs one full sweep: deletes batches until fewer than
 // BatchSize rows are returned, then logs a summary. Returns the total
 // number of rows deleted in the sweep.
 //
@@ -172,7 +172,7 @@ func (p *Pruner) pruneOnce(ctx context.Context) (int64, error) {
 	ing, err := p.store.GetIngestionState(ctx)
 	if err != nil {
 		if err == store.ErrNotFound {
-		p.log.Debug("no ingestion state yet; skipping prune")
+			p.log.Debug("no ingestion state yet; skipping prune")
 			return 0, nil
 		}
 		return 0, fmt.Errorf("loading ingestion state: %w", err)
