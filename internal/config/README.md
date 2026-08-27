@@ -25,6 +25,8 @@ field halts the process mid-flight; every problem is printed before `os.Exit(1)`
 |-----------------------------|-------------------------|
 | `RETENTION_LEDGERS`         | > 0                     |
 | `PARTITION_LEDGER_SPAN`     | > 0                     |
+| `INGEST_PAGE_SIZE`          | > 0                     |
+| `INGEST_BATCH_SIZE`         | > 0                     |
 | `AUDIT_BATCH_LEDGERS`       | > 0                     |
 | `AUDIT_LAG_THRESHOLD`       | > 0                     |
 | `AUDIT_BUDGET_SHARE`        | [0, 1]                  |
