@@ -11,7 +11,7 @@ BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown
 
 LDFLAGS := -ldflags="-X github.com/sorotrail/sorotrail/internal/buildinfo.Version=$(VERSION) -X github.com/sorotrail/sorotrail/internal/buildinfo.Commit=$(COMMIT) -X github.com/sorotrail/sorotrail/internal/buildinfo.BuildDate=$(BUILD_DATE)"
 
-.PHONY: build build-all build-all-integration run test test-db test-integration vet vet-integration test-ci lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec ci
+.PHONY: build build-all build-all-integration run test test-fast test-db test-integration vet vet-integration test-ci lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec ci
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/sorotrail
@@ -31,7 +31,17 @@ build-all-integration:
 run: build
 	./$(BINARY)
 
+# Run the unit suite with the race detector enabled, matching CI's
+# race-enabled run so a data race can't pass locally and fail in CI.
+# -race requires cgo and a C toolchain (gcc); see CONTRIBUTING.md for
+# the Windows note. If the slowdown is unwelcome, use `test-fast`.
 test:
+	go test -race ./...
+
+# Plain unit-suite run without the race detector — the previous `test`
+# behavior, for when the -race overhead (or a missing C toolchain, e.g.
+# on Windows) makes the race-enabled run impractical.
+test-fast:
 	go test ./...
 
 # Run the full test suite including Postgres integration tests.
