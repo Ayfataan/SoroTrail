@@ -24,6 +24,7 @@ import (
 
 	"github.com/sorotrail/sorotrail/internal/api"
 	"github.com/sorotrail/sorotrail/internal/api/graphql"
+	"github.com/sorotrail/sorotrail/internal/archive"
 	"github.com/sorotrail/sorotrail/internal/audit"
 	"github.com/sorotrail/sorotrail/internal/broadcast"
 	"github.com/sorotrail/sorotrail/internal/config"
@@ -293,13 +294,44 @@ func run() error {
 	// RETENTION_MIN_LEDGER is set, the pruner is a no-op goroutine that
 	// returns immediately. Only when at least one retention policy is
 	// configured does it allocate a goroutine and a metrics struct.
-	prn := pruner.New(st, log, pruner.Options{
-		MaxAge:    cfg.RetentionMaxAge,
-		MinLedger: cfg.RetentionMinLedger,
-		BatchSize: cfg.RetentionBatchSize,
-		Pause:     cfg.RetentionPause,
-		Interval:  cfg.RetentionInterval,
-	})
+	//
+	// When ARCHIVE_BUCKET is set, an archiver is created to export events
+	// to S3-compatible storage before pruning. Archival is optional and
+	// idempotent: without ARCHIVE_* vars, the binary behaves identically
+	// to the pre-archive build.
+	var arch *archive.Archiver
+	if cfg.ArchiveEnabled() {
+		var err error
+		aArchiverOpts := archive.Options{
+			Bucket:          cfg.ArchiveBucket,
+			Prefix:          cfg.ArchivePrefix,
+			Endpoint:        cfg.ArchiveEndpoint,
+			Region:          cfg.ArchiveRegion,
+			AccessKeyID:     cfg.ArchiveAccessKeyID,
+			SecretAccessKey: cfg.ArchiveSecretAccessKey,
+			UseSSL:          cfg.ArchiveUseSSL,
+			MaxRetries:      cfg.ArchiveMaxRetries,
+			Logger:          log,
+		}
+		arch, err = archive.New(st, aArchiverOpts)
+		if err != nil {
+			return fmt.Errorf("initializing archive: %w", err)
+		}
+		log.Info("archive enabled",
+			"bucket", cfg.ArchiveBucket,
+			"prefix", cfg.ArchivePrefix,
+			"before_prune", cfg.ArchiveBeforePrune,
+		)
+	}
+
+	prn := pruner.NewWithArchiver(st, log, pruner.Options{
+		MaxAge:             cfg.RetentionMaxAge,
+		MinLedger:          cfg.RetentionMinLedger,
+		BatchSize:          cfg.RetentionBatchSize,
+		Pause:              cfg.RetentionPause,
+		Interval:           cfg.RetentionInterval,
+		ArchiveBeforePrune: cfg.ArchiveBeforePrune,
+	}, arch)
 	if cfg.RetentionEnabled() {
 		api.SetPruner(prn)
 	}
