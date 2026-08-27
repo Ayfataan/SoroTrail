@@ -2669,7 +2669,7 @@ func (s *Server) handleEventStreamWS(w http.ResponseWriter, r *http.Request) {
 
 	if s.bcast == nil {
 
-		http.Error(w, "streaming not configured", http.StatusNotImplemented)
+		writeError(w, http.StatusNotImplemented, errors.New("streaming not configured"))
 
 		return
 
