@@ -249,6 +249,8 @@ func run() error {
 		PollInterval:            cfg.PollInterval,
 		StartLedger:             cfg.StartLedger,
 		RetentionLedgers:        cfg.RetentionLedgers,
+		PageLimit:               cfg.IngestPageSize,
+		WriteBatchSize:          cfg.IngestBatchSize,
 		LagWarnLedgers:          cfg.LagWarnLedgers,
 		SweepConcurrency:        cfg.SweepConcurrency,
 		MaxEventsPerCycle:       cfg.MaxEventsPerCycle,

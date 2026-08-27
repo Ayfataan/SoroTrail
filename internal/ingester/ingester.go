@@ -75,6 +75,9 @@ type Options struct {
 	RetentionLedgers uint32
 	// PageLimit is the getEvents pagination limit per request. Default 1000.
 	PageLimit uint
+	// WriteBatchSize is the maximum number of events written in one store
+	// operation. Default 1000.
+	WriteBatchSize uint
 	// MaxEventsPerCycle caps the number of events a single runOnce cycle
 	// may process, bounding memory and per-cycle latency on busy chains.
 	// When the cap is hit mid-window the sweep stops issuing further
@@ -191,6 +194,9 @@ func (o *Options) applyDefaults() {
 	}
 	if o.PageLimit == 0 {
 		o.PageLimit = 1000
+	}
+	if o.WriteBatchSize == 0 {
+		o.WriteBatchSize = 1000
 	}
 	if o.MaxBackoff <= 0 {
 		o.MaxBackoff = time.Minute
@@ -614,6 +620,10 @@ func (ing *Ingester) BuildFilterBatches(ctx context.Context) ([][]rpc.EventFilte
 // PageLimit returns the getEvents pagination cap.
 func (ing *Ingester) PageLimit() uint { return ing.opts.PageLimit }
 
+// WriteBatchSize returns the maximum number of events written in one store
+// operation.
+func (ing *Ingester) WriteBatchSize() uint { return ing.opts.WriteBatchSize }
+
 // MaxEventsPerCycle returns the per-cycle event cap; 0 means disabled.
 func (ing *Ingester) MaxEventsPerCycle() uint { return ing.opts.MaxEventsPerCycle }
 
@@ -892,6 +902,16 @@ func (ing *Ingester) persistEvents(ctx context.Context, rpcEvents []rpc.Event, l
 		}
 		events = append(events, ev)
 	}
+	for start := 0; start < len(events); start += int(ing.opts.WriteBatchSize) {
+		end := min(start+int(ing.opts.WriteBatchSize), len(events))
+		if err := ing.persistEventBatch(ctx, events[start:end], rpcEvents[len(rpcEvents)-1].Ledger, latestLedger); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ing *Ingester) persistEventBatch(ctx context.Context, events []store.Event, throughLedger, latestLedger uint32) error {
 	persistCtx, persistSpan := ing.tracer.Start(ctx, "ingester.persist_events")
 	inserted, err := ing.writeEventsPersist(persistCtx, events)
 	persistSpan.End()
@@ -899,27 +919,18 @@ func (ing *Ingester) persistEvents(ctx context.Context, rpcEvents []rpc.Event, l
 		return err
 	}
 
-	// Extract addresses from decoded event topics/values and persist the
-	// inverted index. Extraction operates on the decoded JSON (not XDR) and
-	// runs after UpsertEvents so a failed address extraction does not lose
-	// events — the events themselves are already committed.
 	if err := ing.indexEventAddresses(ctx, events); err != nil {
-		// Log the error but do not fail the ingest pass: address indexing
-		// is a derived index and can be rebuilt via the index-addresses
-		// backfill command if it falls behind.
 		ing.log.Error("indexing event addresses", "error", err)
 	}
 
 	ing.log.Info("ingested events",
 		"count", len(events), "new", inserted,
-		"through_ledger", rpcEvents[len(rpcEvents)-1].Ledger,
+		"through_ledger", throughLedger,
 		"latest_ledger", latestLedger)
 
 	if ing.bcast != nil {
 		ing.bcast.Publish(ctx, events)
 	}
-	// Notify webhooks (or other listeners) after successful persistence.
-	// This is a fire-and-forget call — it must never block ingestion.
 	if ing.notifier != nil {
 		ing.notifier.NotifyEvents(ctx, events)
 	}
