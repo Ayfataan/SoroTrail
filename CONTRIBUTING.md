@@ -3,6 +3,14 @@
 Thanks for helping! SoroTrail aims to stay small, idiomatic Go with clear
 seams — most features should slot in behind an existing interface.
 
+## Start here
+
+- **New contributor?** Read [`docs/local-setup.md`](docs/local-setup.md) to
+  clone, build, run, and test locally, and [`docs/architecture-overview.md`](docs/architecture-overview.md)
+  for the ingester / store / api / spec seams.
+- **Triaging or reviewing?** See [`docs/triage.md`](docs/triage.md) for the
+  label taxonomy and workflow.
+
 ## Dev setup
 
 1. Go 1.25+ (any Go ≥ 1.21 works too — the go toolchain auto-downloads the
@@ -19,6 +27,9 @@ seams — most features should slot in behind an existing interface.
    compatibility with the previous workflow.
 6. `make cover` / `make cover-html` for coverage.
 7. `make lint` (install [golangci-lint](https://golangci-lint.run/) locally).
+
+The full, copy-pasteable setup and testing walkthrough lives in
+[`docs/local-setup.md`](docs/local-setup.md).
 
 ### How the integration test layer works (issue #9)
 
@@ -82,6 +93,11 @@ directory. Commit any panic reproducer together with a regression test.
 
 ## Architecture
 
+A concise tour of the four seams (ingester, store, api, spec) and how they
+connect is in [`docs/architecture-overview.md`](docs/architecture-overview.md);
+the full component write-up with data-flow diagrams is in
+[`docs/architecture.md`](docs/architecture.md).
+
 ```
 cmd/sorotrail        main: wiring + graceful shutdown
 internal/config      env parsing + validation
@@ -91,6 +107,7 @@ internal/store       Postgres persistence    (interface: store.Store)
 internal/ingester    polling loop, pagination, backoff
 internal/replay      re-decode stored raw XDR (sorotrail replay)
 internal/api         chi HTTP handlers
+internal/spec        contract-spec enrichment (interface: spec.Enricher)
 internal/testdb      //go:build integration helper shared by tests
 ```
 
