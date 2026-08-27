@@ -1,5 +1,8 @@
 BINARY := bin/sorotrail
 MIGRATIONS := internal/store/migrations
+# Keep in sync with the postgres service in docker-compose.yml (port, user, password, db).
+# CI overrides TEST_DATABASE_URL to localhost:5433 because it maps the container
+# to a non-default host port.
 DATABASE_URL ?= postgres://sorotrail:sorotrail@localhost:5432/sorotrail?sslmode=disable
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
