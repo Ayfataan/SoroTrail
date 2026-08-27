@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,7 @@ type Config struct {
 	HTTPAddr              string        `env:"HTTP_ADDR" envDefault:":8080"`
 	WatchedContracts      []string      `env:"WATCHED_CONTRACTS"`
 	StartLedger           uint32        `env:"START_LEDGER"`
+	StartLedgerRaw        string        `env:"START_LEDGER_RAW"`
 	RetentionLedgers      uint32        `env:"RETENTION_LEDGERS" envDefault:"17280"`
 	IngestPageSize        uint          `env:"INGEST_PAGE_SIZE" envDefault:"1000"`
 	IngestBatchSize       uint          `env:"INGEST_BATCH_SIZE" envDefault:"1000"`
