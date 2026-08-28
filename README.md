@@ -243,6 +243,11 @@ Audit behaviour:
 Set `AUDIT_ENABLED=false` (the default) to disable the auditor entirely;
 the binary's behavior is identical to a pre-audit build.
 
+## Troubleshooting
+
+See the [Operator Runbook](docs/runbook.md) for common failure modes,
+diagnosis steps, and recovery procedures.
+
 ## Development
 
 ```sh
