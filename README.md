@@ -301,6 +301,26 @@ the struct tags in `internal/config/config.go` to prevent drift.
 | `METRICS_ENABLED` | bool | `false` | Enable metrics collection. |
 | `ENABLE_METRICS` | bool | `false` | Expose the Prometheus `/metrics` endpoint. See also `METRICS_ENABLED`. |
 
+With `ENABLE_METRICS=true`, the Prometheus `/metrics` endpoint exposes the
+pipeline metrics (`sorotrail_*`) in addition to the per-server HTTP
+histogram. The RPC metrics answer the first question when ingestion falls
+behind — is the upstream slow, failing, or being throttled by our own
+breaker:
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `sorotrail_rpc_call_duration_seconds` | histogram | `method`, `outcome` (`success` \| `error`) | Latency of one JSON-RPC call. `method` is a fixed enum (`getEvents`, `getLatestLedger`, `getHealth`, `getLedgerEntries`, `simulateTransaction`); the histogram's `_count` for a `(method, outcome)` pair is the call total. |
+| `sorotrail_rpc_retries_total` | counter | `method`, `reason` (`backoff` \| `retry_after`) | Retry attempts after the first; `reason` says whether the wait came from the computed exponential backoff or a provider `Retry-After` hint. |
+| `sorotrail_rpc_backoff_seconds_total` | counter | `method` | Cumulative seconds slept between retries — a long tail means the provider is throttling. |
+| `sorotrail_rpc_failovers_total` | counter | `reason` (`switch` \| `reanchor`) | Multi-provider failover events: traffic moved to another provider (`switch`), or a cursor request hit the re-anchor path (`reanchor`). |
+| `sorotrail_rpc_circuit_breaker_state` | gauge (0/1) | `state` (`closed` \| `open` \| `half-open`) | Current circuit-breaker state; alert on `{state="open"} == 1`. |
+| `sorotrail_rpc_provider_state` | gauge (0/1) | `provider`, `state` (`active` \| `degraded` \| `down`) | Health of each failover provider. Only present in multi-provider mode (`RPC_URLS`). |
+
+Endpoint-derived labels never carry credentials: `provider` labels are
+stripped to the URL hostname (scheme, userinfo/basic-auth, path, and query
+are removed), and `method`/`reason`/`state`/`outcome` come from fixed
+enums, so label cardinality is bounded.
+
 ## Multi-provider failover
 
 `RPC_URL` is a single point of failure. Setting `RPC_URLS` enables a
@@ -1418,10 +1438,12 @@ below for the contract the field implies.
 Serves `http_request_duration_seconds`, a Prometheus histogram of HTTP
 request latency labeled by `route` (the matched chi route pattern, e.g.
 `/events/{id}` — never the raw path, so path parameters don't blow up
-cardinality), `method`, and `status`.
+cardinality), `method`, and `status` — plus the `sorotrail_*` pipeline
+and RPC metrics (see the [Metrics](#metrics) section).
 
 ```sh
 curl -s localhost:8080/metrics | grep http_request_duration_seconds
+curl -s localhost:8080/metrics | grep sorotrail_rpc_
 ```
 
 Exempt from the rate limiter for the same reason `/health` is: a
