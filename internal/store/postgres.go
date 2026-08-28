@@ -1930,6 +1930,13 @@ func (p *Postgres) UpsertAddressRefs(ctx context.Context, refs []AddressRef) err
 // filter params as the main events listing (contract_id, type, ledger range
 // via from_ledger/to_ledger).
 func (p *Postgres) QueryAddressEvents(ctx context.Context, address string, f EventFilter) ([]Event, string, error) {
+	// The tenant boundary is evaluated before anything else, and an empty
+	// scope returns an empty page without issuing SQL — same contract as
+	// QueryEvents.
+	if f.Scope.DeniesAll() {
+		return nil, "", nil
+	}
+
 	limit := f.Limit
 	if limit <= 0 {
 		limit = DefaultQueryLimit
@@ -1950,6 +1957,11 @@ func (p *Postgres) QueryAddressEvents(ctx context.Context, address string, f Eve
 	// Join with event_addresses to find events for this address.
 	where = append(where, "ea.address = "+arg(address))
 	where = append(where, "e.id = ea.event_id")
+
+	// Scope is applied before any other filter, exactly like QueryEvents.
+	if !f.Scope.IsWildcard() {
+		where = append(where, "e.contract_id = ANY("+arg(f.Scope.Contracts())+")")
+	}
 
 	if f.ContractID != "" {
 		where = append(where, "e.contract_id = "+arg(f.ContractID))
