@@ -1,5 +1,24 @@
 // Package ingester runs the polling loop that pulls contract events from
 // Stellar RPC and persists them.
+//
+// The entry point is [New], which wires an [Ingester] from an [rpc.Client],
+// a [store.Store], a [decode.Decoder], a logger, and [Options]. Call
+// [Ingester.Run] to start the loop; it blocks until the context is
+// canceled.
+//
+// Non-obvious contracts:
+//   - [Ingester.Run] never returns nil on success; the only terminal
+//     condition is context cancellation (returns ctx.Err()).
+//   - Errors are retried with jittered exponential backoff, capped at
+//     [Options.MaxBackoff].
+//   - [Ingester.BuildFilterBatches] is exported so the auditor can fetch
+//     with the exact same filter set as ingest — events outside this
+//     filter set were intentionally not stored and must not be flagged as
+//     audit discrepancies.
+//   - [Ingester.ReingestRange] does NOT advance the ingester's persisted
+//     cursor; it is for auditor repairs of specific ledger ranges.
+//   - [Ingester.PageLimit] is exported so the auditor can reuse it and
+//     never silently disagree on page size.
 package ingester
 
 import (
