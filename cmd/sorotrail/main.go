@@ -76,6 +76,8 @@ func dispatch(args []string) error {
 			os.Exit(code)
 		}
 		return nil
+	case "schema-inspect":
+		return runSchemaInspect(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -99,6 +101,8 @@ subcommands:
                (sorotrail index-addresses --help)
   healthcheck  probe /health and exit (used by docker HEALTHCHECK)
                (sorotrail healthcheck --help)
+  schema-inspect  report migration state, partitions, and table sizes
+               (sorotrail schema-inspect --help)
 `)
 }
 
