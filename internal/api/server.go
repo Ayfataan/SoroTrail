@@ -1,5 +1,19 @@
-// Package api serves stored events over HTTP. Endpoints are documented in
-// the README's API reference.
+// Package api serves stored events over HTTP.
+//
+// The entry point is [New], which builds a [Server] from a [store.Store],
+// an [rpc.Client] (used only for /health), and a logger. Call
+// [Server.Router] to get the [http.Handler] with all routes mounted.
+//
+// Non-obvious contracts:
+//   - The package is read-only: no endpoint writes data. Anything that
+//     writes (e.g. managing watched contracts at runtime) should come with
+//     auth first.
+//   - [SetAuditor] must be called before [Server.Router] so the first
+//     /stats request observes a stable value. When AUDIT_ENABLED=false
+//     the function is never called and /stats returns zero-valued audit
+//     counters (omitted from JSON via omitempty).
+//
+// Endpoints are documented in the README's API reference.
 package api
 
 import (

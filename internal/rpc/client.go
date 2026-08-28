@@ -1,5 +1,19 @@
 // Package rpc is a minimal JSON-RPC 2.0 client for the Stellar RPC (Soroban)
 // methods SoroTrail needs: getEvents, getLatestLedger, getHealth.
+//
+// The entry point is [NewHTTPClient], which returns an [*HTTPClient]
+// implementing [Client]. The ingester and API depend on the [Client]
+// interface, not on the concrete type, so tests can substitute a mock.
+//
+// Non-obvious contracts:
+//   - Requests are rate-limited by default (≥100ms apart, ~10 req/s)
+//     via [WithMinRequestInterval]. Set to 0 to disable.
+//   - [HTTPClient] auto-detects whether the server supports
+//     xdrFormat: "json". If the server rejects it, the client flips
+//     a flag and falls back to returning raw XDR for callers to
+//     decode locally.
+//   - [IsLedgerOutOfRange] should be checked after GetEvents to detect
+//     when the resume point has aged out of the RPC's retention window.
 package rpc
 
 import (
