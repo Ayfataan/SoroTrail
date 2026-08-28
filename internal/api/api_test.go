@@ -474,20 +474,89 @@ func TestListEvents_TopicContainsValidation(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	t.Run("all healthy", func(t *testing.T) {
-		resp, _ := doGet(t, newTestServer(&stubStore{}, nil), "/health")
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-	})
-	t.Run("db down", func(t *testing.T) {
+	// /health is the liveness probe — it must always return 200 regardless
+	// of dependency state so a database or RPC outage does not trigger a
+	// Kubernetes restart loop.
+	t.Run("always 200 even with deps down", func(t *testing.T) {
 		st := &stubStore{pingErr: errors.New("connection refused")}
-		resp, body := doGet(t, newTestServer(st, nil), "/health")
-		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
-		assert.Contains(t, string(body), "connection refused")
-	})
-	t.Run("rpc down", func(t *testing.T) {
 		rc := &stubRPC{healthErr: errors.New("rpc unreachable")}
-		resp, _ := doGet(t, newTestServer(&stubStore{}, rc), "/health")
+		resp, body := doGet(t, newTestServer(st, rc), "/health")
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		var h healthResponse
+		require.NoError(t, json.Unmarshal(body, &h))
+		assert.Equal(t, "ok", h.Status)
+	})
+}
+
+func TestReadyz(t *testing.T) {
+	stubIngestion := &store.IngestionState{LastIngestedLedger: 100}
+
+	t.Run("all healthy", func(t *testing.T) {
+		st := &stubStore{ingestionState: stubIngestion}
+		rc := &stubRPC{health: rpc.Health{Status: "healthy", LatestLedger: 150}}
+		resp, body := doGet(t, newTestServer(st, rc), "/readyz")
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		var h healthResponse
+		require.NoError(t, json.Unmarshal(body, &h))
+		assert.Equal(t, "ok", h.Status)
+		assert.Equal(t, "ok", h.Checks["database"])
+		assert.Equal(t, "ok", h.Checks["rpc"])
+	})
+
+	t.Run("db down is unready", func(t *testing.T) {
+		st := &stubStore{pingErr: errors.New("connection refused"), ingestionState: stubIngestion}
+		rc := &stubRPC{health: rpc.Health{Status: "healthy", LatestLedger: 150}}
+		resp, body := doGet(t, newTestServer(st, rc), "/readyz")
 		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+		var h healthResponse
+		require.NoError(t, json.Unmarshal(body, &h))
+		assert.Equal(t, "unready", h.Status)
+		assert.Contains(t, h.Checks["database"], "connection refused")
+	})
+
+	t.Run("rpc down is unready", func(t *testing.T) {
+		st := &stubStore{ingestionState: stubIngestion}
+		rc := &stubRPC{healthErr: errors.New("rpc unreachable")}
+		resp, body := doGet(t, newTestServer(st, rc), "/readyz")
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+		var h healthResponse
+		require.NoError(t, json.Unmarshal(body, &h))
+		assert.Equal(t, "unready", h.Status)
+		assert.Contains(t, h.Checks["rpc"], "rpc unreachable")
+	})
+
+	t.Run("high ingestion lag is degraded", func(t *testing.T) {
+		st := &stubStore{ingestionState: stubIngestion}
+		// Chain head 2000 - last ingested 100 = lag 1900, which exceeds 1000 threshold
+		rc := &stubRPC{health: rpc.Health{Status: "healthy", LatestLedger: 2000}}
+		resp, body := doGet(t, newTestServer(st, rc), "/readyz")
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "degraded still returns 200")
+		var h healthResponse
+		require.NoError(t, json.Unmarshal(body, &h))
+		assert.Equal(t, "degraded", h.Status)
+		assert.Contains(t, h.Checks["ingestion_lag"], "exceeds threshold")
+	})
+
+	t.Run("both db and rpc down", func(t *testing.T) {
+		st := &stubStore{pingErr: errors.New("db down")}
+		rc := &stubRPC{healthErr: errors.New("rpc down")}
+		resp, body := doGet(t, newTestServer(st, rc), "/readyz")
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+		var h healthResponse
+		require.NoError(t, json.Unmarshal(body, &h))
+		assert.Equal(t, "unready", h.Status)
+		assert.Contains(t, h.Checks["database"], "db down")
+		assert.Contains(t, h.Checks["rpc"], "rpc down")
+	})
+
+	t.Run("no ingestion state is not a failure", func(t *testing.T) {
+		st := &stubStore{ingestionErr: store.ErrNotFound}
+		rc := &stubRPC{health: rpc.Health{Status: "healthy", LatestLedger: 100}}
+		resp, body := doGet(t, newTestServer(st, rc), "/readyz")
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		var h healthResponse
+		require.NoError(t, json.Unmarshal(body, &h))
+		assert.Equal(t, "ok", h.Status)
 	})
 }
 

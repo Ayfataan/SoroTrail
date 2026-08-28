@@ -122,7 +122,7 @@ type enrichedEventWithXDR struct {
 }
 
 type healthResponse struct {
-	Status string            `json:"status"` // ok | degraded
+	Status string            `json:"status"` // ok | degraded | unready
 	Checks map[string]string `json:"checks"`
 }
 
@@ -235,27 +235,129 @@ func eventToMap(ev store.Event, fields map[string]bool) map[string]any {
 	return m
 }
 
+// handleHealth is the liveness probe. It reports whether the process
+// is alive and able to serve HTTP requests. It intentionally does NOT
+// check external dependencies (database, RPC) so a dependency outage
+// cannot trigger a restart loop — that is the readiness probe's job
+// (see handleReadyz).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-
-	resp := healthResponse{Status: "ok", Checks: map[string]string{"database": "ok", "rpc": "ok"}}
-	status := http.StatusOK
-
-	// DB connectivity check: Ping the store to verify the database is reachable.
-	if err := s.store.Ping(ctx); err != nil {
-		resp.Status, resp.Checks["database"] = "degraded", err.Error()
-		status = http.StatusServiceUnavailable
-	}
-	if health, err := s.rpc.GetHealth(ctx); err != nil {
-		resp.Status, resp.Checks["rpc"] = "degraded", err.Error()
-		status = http.StatusServiceUnavailable
-	} else if health.Status != "healthy" {
-		resp.Status, resp.Checks["rpc"] = "degraded", fmt.Sprintf("rpc reports %q", health.Status)
-		status = http.StatusServiceUnavailable
-	}
 	writeCacheHeaders(w, cacheNoStore, 0, "")
-	writeJSON(w, status, resp)
+	writeJSON(w, http.StatusOK, healthResponse{
+		Status: "ok",
+		Checks: map[string]string{"process": "ok"},
+	})
+}
+
+// checkResult holds the outcome of a single readiness sub-check.
+type checkResult struct {
+	name   string
+	err    error
+	status string // "ok", "degraded", or "unready"
+}
+
+// handleReadyz is the readiness probe. It checks every dependency the
+// process needs to serve traffic, each with its own timeout so a slow
+// check cannot hang the probe. The response names which dependency
+// failed.
+//
+// Status semantics:
+//   - "ok":      all checks pass.
+//   - "degraded": a non-critical check failed or a threshold was exceeded
+//     (e.g. ingestion lag beyond threshold); the process can still serve
+//     requests but may return stale data.
+//   - "unready":  a critical dependency is unreachable (database down);
+//     the process should not receive traffic.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	const checkTimeout = 3 * time.Second
+
+	resp := healthResponse{Status: "ok", Checks: map[string]string{}}
+	overallStatus := http.StatusOK
+
+	// Run all checks concurrently so one slow dependency does not
+	// block the others.
+	results := make(chan checkResult, 3)
+
+	// 1. Database connectivity check.
+	go func() {
+		dbCtx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+		defer cancel()
+		err := s.store.Ping(dbCtx)
+		if err != nil {
+			results <- checkResult{"database", err, "unready"}
+			return
+		}
+		results <- checkResult{"database", nil, "ok"}
+	}()
+
+	// 2. RPC endpoint reachability check.
+	go func() {
+		rpcCtx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+		defer cancel()
+		health, err := s.rpc.GetHealth(rpcCtx)
+		if err != nil {
+			results <- checkResult{"rpc", err, "unready"}
+			return
+		}
+		if health.Status != "healthy" {
+			results <- checkResult{"rpc", fmt.Errorf("rpc reports %q", health.Status), "degraded"}
+			return
+		}
+		results <- checkResult{"rpc", nil, "ok"}
+	}()
+
+	// 3. Ingestion lag check.
+	go func() {
+		lagCtx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+		defer cancel()
+		state, err := s.store.GetIngestionState(lagCtx)
+		if err != nil {
+			// Ingestion state missing or unreadable is not a readiness
+			// failure — the process may be starting fresh.
+			results <- checkResult{"ingestion_lag", fmt.Errorf("%w (non-critical)", err), "ok"}
+			return
+		}
+		// Get the chain head from RPC to compute lag. Use a separate
+		// context since the RPC goroutine may still be running.
+		rpcCtx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+		defer cancel()
+		rpcHealth, err := s.rpc.GetHealth(rpcCtx)
+		if err != nil {
+			// RPC unreachable is already reported by the RPC check above;
+			// lag is unknown but not unready on its own.
+			results <- checkResult{"ingestion_lag", fmt.Errorf("lag unknown: rpc unreachable (non-critical)"), "ok"}
+			return
+		}
+		lag := int64(rpcHealth.LatestLedger) - state.LastIngestedLedger
+		lagStr := fmt.Sprintf("%d", lag)
+		const defaultLagThreshold = 1000
+		if lag > defaultLagThreshold {
+			results <- checkResult{"ingestion_lag", fmt.Errorf("lag %d exceeds threshold %d", lag, defaultLagThreshold), "degraded"}
+			return
+		}
+		results <- checkResult{"ingestion_lag", nil, lagStr}
+	}()
+
+	// Collect results.
+	for range 3 {
+		r := <-results
+		if r.err != nil {
+			resp.Checks[r.name] = r.err.Error()
+		} else {
+			resp.Checks[r.name] = r.status
+		}
+		if r.status == "unready" {
+			resp.Status = "unready"
+			overallStatus = http.StatusServiceUnavailable
+		} else if r.status == "degraded" && resp.Status != "unready" {
+			resp.Status = "degraded"
+			// degraded checks still return 200 so the readiness probe
+			// keeps the pod in the service — the data may be stale
+			// but the process can still serve requests.
+		}
+	}
+
+	writeCacheHeaders(w, cacheNoStore, 0, "")
+	writeJSON(w, overallStatus, resp)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
