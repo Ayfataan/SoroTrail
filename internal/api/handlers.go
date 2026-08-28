@@ -474,7 +474,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeCacheHeaders(w, cacheNoStore, 0, "")
-	writeJSON(w, overallStatus, resp)
+	writeJSON(w, status, resp)
 }
 
 // handleDeleteEvents is the admin-only bulk delete endpoint. It deletes all
