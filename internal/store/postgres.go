@@ -246,7 +246,7 @@ func insertEventsBatch(events []Event, onUpdate bool) *pgx.Batch {
 		` + conflict
 	batch := &pgx.Batch{}
 	for _, e := range events {
-		// 13 placeholders → 13 args. nullable helpers turn empty raw XDR
+		// 14 placeholders → 14 args. nullable helpers turn empty raw XDR
 		// into SQL NULL so the column has one representation of "absent"
 		// rather than two.
 		batch.Queue(stmt,
