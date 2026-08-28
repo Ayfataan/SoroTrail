@@ -15,23 +15,24 @@ seams — most features should slot in behind an existing interface.
 
 1. Go 1.25+ (any Go ≥ 1.21 works too — the go toolchain auto-downloads the
    version pinned in go.mod) and Docker.
-2. `docker compose up -d postgres` for a local database (the integration
+2. Run `make help` to see every available target.
+3. `docker compose up -d postgres` for a local database (the integration
    suite can also spin up its own ephemeral container — see "How the
    integration test layer works" below).
-3. `make test` for the unit suite, race-detector enabled
+4. `make test` for the unit suite, race-detector enabled
    (`go test -race ./...`) — the same race checking CI runs, so a data
    race can't pass locally and fail in CI. The integration tests are
    gated behind the `integration` build tag, so it stays a unit-only
    run. `-race` requires cgo and a C toolchain; on Windows, install gcc
    (e.g. MinGW-w64) or use `make test-fast` for the plain, non-race
    run.
-4. `make test-integration` runs the integration suite against a real
+5. `make test-integration` runs the integration suite against a real
    Postgres — `go test -tags=integration -p 1 ./... -count=1`.
-5. `make test-db` runs everything, including integration tests, against
+6. `make test-db` runs everything, including integration tests, against
    whatever `TEST_DATABASE_URL` points at — kept for backwards
    compatibility with the previous workflow.
-6. `make cover` / `make cover-html` for coverage.
-7. `make lint` (install [golangci-lint](https://golangci-lint.run/) locally).
+7. `make cover` / `make cover-html` for coverage.
+8. `make lint` (install [golangci-lint](https://golangci-lint.run/) locally).
 
 The full, copy-pasteable setup and testing walkthrough lives in
 [`docs/local-setup.md`](docs/local-setup.md).
@@ -174,7 +175,8 @@ locally (build, `go vet` with and without the `integration` tag, the tagged
 and untagged test suites, the benchmark smoke run, and `golangci-lint`) and
 stops at the first failing step, just like CI. The database-backed tests skip
 gracefully when `TEST_DATABASE_URL` (or Docker) is unavailable, so `make ci`
-passes without Postgres and runs the full gate once one is available.
+passes without Postgres and runs the full gate once one is available. Every
+target is documented; run `make help` to list them all.
 
 `make test-ci` is the exact command the CI test job runs
 (`go test -p 1 ./... -count=1 -race -timeout=120s`); `make test` runs the
