@@ -20,7 +20,12 @@ import (
 	"github.com/sorotrail/sorotrail/internal/metrics"
 )
 
-// ErrNotFound is returned when a lookup matches no rows.
+// ErrNotFound is returned by [Store] lookup methods when no matching row
+// exists. Callers should use errors.Is to check for it.
+//
+// Returned by: [Store.GetEvent], [Store.GetIngestionState],
+// [Store.GetAuditState], [Store.ListOpenFindingsByRange],
+// [Postgres.GetReplayState].
 var ErrNotFound = errors.New("not found")
 
 // ErrInvalidCursor is returned when a pagination cursor is malformed for the
@@ -36,7 +41,11 @@ const (
 	poolReconnectMaxBackoff  = 30 * time.Second
 )
 
-// Postgres implements Store on a pgx connection pool.
+// Postgres implements [Store] on a pgx connection pool. It is the only
+// production implementation of the [Store] interface.
+//
+// Create an instance with [NewPostgres]. The caller owns the pool's
+// lifecycle and must close it when done.
 type Postgres struct {
 	pool          *pgxpool.Pool
 	partitionSpan int64
@@ -49,6 +58,7 @@ type Postgres struct {
 	stopHealthCk  context.CancelFunc
 }
 
+// Compile-time assertion that *Postgres implements Store.
 var _ Store = (*Postgres)(nil)
 
 // NewPostgres wraps an existing pool. The caller owns the pool's lifecycle.
@@ -236,7 +246,7 @@ func insertEventsBatch(events []Event, onUpdate bool) *pgx.Batch {
 		` + conflict
 	batch := &pgx.Batch{}
 	for _, e := range events {
-		// 13 placeholders → 13 args. nullable helpers turn empty raw XDR
+		// 14 placeholders → 14 args. nullable helpers turn empty raw XDR
 		// into SQL NULL so the column has one representation of "absent"
 		// rather than two.
 		batch.Queue(stmt,
@@ -1930,6 +1940,13 @@ func (p *Postgres) UpsertAddressRefs(ctx context.Context, refs []AddressRef) err
 // filter params as the main events listing (contract_id, type, ledger range
 // via from_ledger/to_ledger).
 func (p *Postgres) QueryAddressEvents(ctx context.Context, address string, f EventFilter) ([]Event, string, error) {
+	// The tenant boundary is evaluated before anything else, and an empty
+	// scope returns an empty page without issuing SQL — same contract as
+	// QueryEvents.
+	if f.Scope.DeniesAll() {
+		return nil, "", nil
+	}
+
 	limit := f.Limit
 	if limit <= 0 {
 		limit = DefaultQueryLimit
@@ -1950,6 +1967,11 @@ func (p *Postgres) QueryAddressEvents(ctx context.Context, address string, f Eve
 	// Join with event_addresses to find events for this address.
 	where = append(where, "ea.address = "+arg(address))
 	where = append(where, "e.id = ea.event_id")
+
+	// Scope is applied before any other filter, exactly like QueryEvents.
+	if !f.Scope.IsWildcard() {
+		where = append(where, "e.contract_id = ANY("+arg(f.Scope.Contracts())+")")
+	}
 
 	if f.ContractID != "" {
 		where = append(where, "e.contract_id = "+arg(f.ContractID))

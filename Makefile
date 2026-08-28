@@ -9,89 +9,73 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unk
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown")
 
-LDFLAGS := -ldflags="-X github.com/sorotrail/sorotrail/internal/buildinfo.Version=$(VERSION) -X github.com/sorotrail/sorotrail/internal/buildinfo.Commit=$(COMMIT) -X github.com/sorotrail/sorotrail/internal/buildinfo.BuildDate=$(BUILD_DATE)"
+LDFLAGS := -ldflags="-X github.com/sorotrail/sorotrail/internal/buildinfo.Version=$(VERSION) -X github.com/sorotrail/sorotrail/internal/buildinfo.Commit=$(COMMIT) -X github/sorotrail/sorotrail/internal/buildinfo.BuildDate=$(BUILD_DATE)"
 
-.PHONY: build build-all build-all-integration run test test-fast test-db test-integration vet vet-integration test-ci lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec ci
+.PHONY: help build build-all build-all-integration run test test-fast test-db test-ci test-integration simtest simtest-long vet vet-integration lint bench bench-ci ci cover cover-html migrate-up migrate-down seed docker-up docker-down spec clean
+.PHONY: build build-all build-all-integration run test test-fast test-db test-integration vet vet-integration test-ci lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec client ci
 
-build:
+# ── Self-documenting help ────────────────────────────────────────────────────
+# Every target that starts with a double-hash comment (##) is listed by
+# `make help`.  Bare `make` prints this list so contributors never have
+# to read the Makefile end-to-end to discover what's available.
+.DEFAULT_GOAL := help
+
+help: ## Show this help message
+	@printf "\nUsage:  make <target>\n\n"
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ { printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@printf "\n"
+
+# ── Build ────────────────────────────────────────────────────────────────────
+
+build: ## Build the sorotrail binary
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/sorotrail
 
-# Compile every package, like the CI test job's build step, rather than
-# only the binary. Kept separate from `build` so `ci` can mirror CI
-# closely without changing what `build` produces.
-build-all:
+build-all: ## Compile every package (mirrors CI build step)
 	go build ./...
 
-# Compile every package with the `integration` build tag, mirroring the
-# CI integration job's build step so an untagged build can't hide a break
-# in the tagged code.
-build-all-integration:
+build-all-integration: ## Compile with the integration build tag
 	go build -tags=integration ./...
 
-run: build
+run: build ## Build and run the binary
 	./$(BINARY)
 
-# Run the unit suite with the race detector enabled, matching CI's
-# race-enabled run so a data race can't pass locally and fail in CI.
-# -race requires cgo and a C toolchain (gcc); see CONTRIBUTING.md for
-# the Windows note. If the slowdown is unwelcome, use `test-fast`.
-test:
+# ── Test ─────────────────────────────────────────────────────────────────────
+
+test: ## Run the unit suite with race detector
 	go test -race ./...
 
-# Plain unit-suite run without the race detector — the previous `test`
-# behavior, for when the -race overhead (or a missing C toolchain, e.g.
-# on Windows) makes the race-enabled run impractical.
-test-fast:
+test-fast: ## Run unit tests without the race detector
 	go test ./...
 
-# Run the full test suite including Postgres integration tests.
-# Requires a running Postgres, e.g. `make docker-up` first.
-# -p 1 serializes packages: the integration tests in internal/store and
-# internal/replay share one database and truncate the same tables.
-test-db:
+test-db: ## Run full test suite against Postgres (requires DATABASE_URL)
 	TEST_DATABASE_URL=$(DATABASE_URL) go test -p 1 ./...
 
-vet:
-	go vet ./...
-
-# Vet the integration-tagged code too; `go vet ./...` alone skips files
-# behind the `integration` build tag.
-vet-integration:
-	go vet -tags=integration ./...
-
-# Integration test suite only, gated behind the `integration` build tag so
-# `go test ./...` stays fast. The suite honors TEST_DATABASE_URL when set
-# (CI's services-postgres path), and otherwise spins up an ephemeral
-# Postgres 16-alpine via testcontainers-go per `internal/testdb.Setup`
-# call. Either way, the four required coverage areas — migration-up from
-# empty, event upsert idempotency, ingestion_state save/resume across
-# ingester restarts, GET /events filter combinations against seeded
-# data — are asserted against a real PostgreSQL.
-#
-# -p 1 because the integration tests in internal/store and internal/replay
-# share one database and truncate the same tables.
-test-integration:
-	go test -tags=integration -p 1 ./... -count=1
-
-# Mirror the CI test job's suite: the full untagged test run, serialized
-# across packages and race-enabled, as CI runs it. The DB-backed tests
-# t.Skip when TEST_DATABASE_URL is unset (see internal/store/postgres_test.go),
-# so this passes without a database and silently scales up to the full CI
-# gate the moment TEST_DATABASE_URL (or Postgres behind the default
-# DATABASE_URL) is available.
-test-ci:
+test-ci: ## Mirror the CI test job exactly (race-enabled, serial, 120s timeout)
 	go test -p 1 ./... -count=1 -race -timeout=120s
 
-# Run the deterministic simulation test suite (mock store, fast).
-simtest:
+test-integration: ## Run the integration-tagged suite against a real Postgres
+	go test -tags=integration -p 1 ./... -count=1
+
+simtest: ## Run the deterministic simulation suite (mock store, fast)
 	go test ./internal/simtest/... -count=1 -timeout 120s
 
-# Run the simulation test suite with randomized mode extended budget.
-# Uses a higher iteration count and prints seeds for reproducibility.
-simtest-long:
+simtest-long: ## Run simulations with randomized-mode extended budget
 	go test ./internal/simtest/... -count=1 -timeout 600s -v -run "TestAllCuratedScenarios|TestRandomizedMode"
 
-bench:
+# ── Vet / Lint ───────────────────────────────────────────────────────────────
+
+vet: ## Run go vet on all packages
+	go vet ./...
+
+vet-integration: ## Vet integration-tagged code too
+	go vet -tags=integration ./...
+
+lint: ## Run golangci-lint
+	golangci-lint run
+
+# ── Benchmarks ───────────────────────────────────────────────────────────────
+
+bench: ## Run benchmarks with environment capture
 	@echo "=================================================================="
 	@echo " SoroTrail Benchmark Environment Capture"
 	@echo "=================================================================="
@@ -104,59 +88,57 @@ bench:
 	@echo "=================================================================="
 	TEST_DATABASE_URL=$(DATABASE_URL) go test -bench=. -benchmem ./...
 
-bench-ci:
+bench-ci: ## Benchmark smoke run (CI-length, no DB required)
 	go test -bench=. -benchtime=10ms ./...
 
-seed:
-	go run ./cmd/seed -db="$(DATABASE_URL)" -count=1000000
+# ── CI gate ──────────────────────────────────────────────────────────────────
+# Composed from the existing targets so the two cannot drift.
+# Runs as sub-makes so the first failure stops the run.
 
-lint:
-	golangci-lint run
+ci: build-all vet test-ci bench-ci build-all-integration vet-integration test-integration lint ## Reproduce the full CI gate locally (first failure stops)
 
-# Reproduce the CI gate locally: the test + integration + lint jobs from
-# .github/workflows/ci.yml run build, vet (plain and integration-tagged),
-# the tagged and untagged test suites, the benchmark smoke run, and
-# golangci-lint. Each piece delegates to the existing target above so the
-# target list and CI can't drift, and runs as a sub-make with the default
-# `-k` unset, so the first failing step stops the run — one error at a
-# time, in CI's order. DB-backed suites skip gracefully when
-# TEST_DATABASE_URL (or Docker) is unavailable rather than fail.
-ci:
-	$(MAKE) build-all
-	$(MAKE) vet
-	$(MAKE) test-ci
-	$(MAKE) bench-ci
-	$(MAKE) build-all-integration
-	$(MAKE) vet-integration
-	$(MAKE) test-integration
-	$(MAKE) lint
+# ── Coverage ─────────────────────────────────────────────────────────────────
 
-# Regenerate the JSON copy of the OpenAPI spec that internal/api embeds and
-# serves at /openapi.json. api/openapi.yaml is the source of truth; run this
-# after editing it, or pkg/docs.TestSpecCopiesAreIdentical fails the build.
-spec:
-	go run ./cmd/specgen
+cover: ## Run tests with coverage profile
+# Regenerate the versioned API client in pkg/client from api/openapi.yaml.
+# Run this after changing the spec, or pkg/client's drift test fails the
+# build (see pkg/client/README.md).
+client:
+	go run ./cmd/clientgen
 
 cover:
 	go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
-cover-html: cover
+cover-html: cover ## Open coverage report in browser
 	go tool cover -html=coverage.out
 
+# ── Database / Migrations ────────────────────────────────────────────────────
 # Migrations run automatically on startup; these targets are for manual control.
 # Requires the migrate CLI: https://github.com/golang-migrate/migrate
-migrate-up:
+
+migrate-up: ## Apply all pending migrations
 	migrate -path $(MIGRATIONS) -database "$(DATABASE_URL)" up
 
-migrate-down:
+migrate-down: ## Roll back the last migration
 	migrate -path $(MIGRATIONS) -database "$(DATABASE_URL)" down 1
 
-docker-up:
+seed: ## Seed the database with sample events
+	go run ./cmd/seed -db="$(DATABASE_URL)" -count=1000000
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+
+docker-up: ## Start Postgres and the indexer via docker compose
 	docker compose up -d --build
 
-docker-down:
+docker-down: ## Tear down docker compose services
 	docker compose down
 
-clean:
-	rm -rf bin coverage.out
+# ── OpenAPI ──────────────────────────────────────────────────────────────────
 
+spec: ## Regenerate the OpenAPI spec JSON that internal/api embeds
+	go run ./cmd/specgen
+
+# ── Cleanup ──────────────────────────────────────────────────────────────────
+
+clean: ## Remove build artifacts
+	rm -rf bin coverage.out

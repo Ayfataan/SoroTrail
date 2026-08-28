@@ -1,0 +1,99 @@
+name: Auto-merge
+
+# Merges pull requests that are genuinely ready: labelled, conflict-free,
+# with every required check passed, and up to date with main. A branch that
+# is behind is updated first and merged on a later run, once CI has re-run
+# against the updated code.
+#
+# Identity: this runs as automation and is attributed as such. Use a GitHub
+# App installation token or a machine account's PAT — not a human maintainer's
+# personal token. Automating from a personal account is what gets accounts
+# flagged; an App or Actions identity is the supported way to do this.
+#
+# TOKEN: the default GITHUB_TOKEN is deliberately not used. Pushes made with
+# it do not trigger workflow runs, so a branch this bot updated would sit
+# forever with stale checks and never become mergeable. AUTOMERGE_TOKEN must
+# be an App installation token or a PAT with `repo` scope.
+
+on:
+  # The moment CI finishes is when a PR most often becomes mergeable.
+  check_suite:
+    types: [completed]
+  # A sweep, so nothing is stranded by a missed or out-of-order event.
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Single PR number to evaluate (blank = all open PRs)"
+        required: false
+        type: string
+      dry_run:
+        description: "Evaluate and log decisions without merging or commenting"
+        required: false
+        type: boolean
+        default: true
+
+# One run at a time: two concurrent sweeps could both decide to merge, and the
+# loser would then be operating on a stale view of main.
+concurrency:
+  group: auto-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify the token is present
+        env:
+          AUTOMERGE_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+        run: |
+          if [ -z "$AUTOMERGE_TOKEN" ]; then
+            echo "::error::AUTOMERGE_TOKEN is not set."
+            echo "The default GITHUB_TOKEN cannot be used here: pushes made with it"
+            echo "do not trigger workflow runs, so an updated branch would never get"
+            echo "fresh checks and would never become mergeable."
+            echo "Set AUTOMERGE_TOKEN to a GitHub App installation token or a machine"
+            echo "account PAT with 'repo' scope."
+            exit 1
+          fi
+
+      - name: Evaluate and merge
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: main
+
+          # --- policy knobs -------------------------------------------------
+          # Opt-in by label. This defaults to on deliberately: this repository
+          # takes pull requests from many external contributors, and "CI is
+          # green" is not the same as "this code is safe to run". A passing
+          # test suite says nothing about what the change actually does.
+          # Set REQUIRE_LABEL to false only if you are comfortable merging any
+          # green external contribution without a human looking at it.
+          REQUIRE_LABEL: "true"
+          AUTOMERGE_LABEL: automerge
+
+          # Authors who may merge without the label. Leave empty to require it
+          # from everyone.
+          TRUSTED_AUTHORS: ""
+
+          MERGE_METHOD: merge
+          ONLY_PR: ${{ github.event.inputs.pr }}
+          # Scheduled and check_suite runs act for real; a manual run defaults
+          # to dry-run so you can see what it would do before letting it.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
+        run: python .github/scripts/auto_merge.py
