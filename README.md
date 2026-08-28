@@ -1680,6 +1680,114 @@ outside it. Companion tests check that each enum is exactly the set the
 parsing code allows, that required parameters really are refused when absent,
 and that no parameter is documented which the handler discards.
 
+## Operational Monitoring
+
+SoroTrail exports Prometheus metrics at `GET /metrics` that cover the
+entire ingestion pipeline, RPC health, database latency, and webhook
+delivery. This section documents the key metrics and provides pre-built
+Grafana dashboards and Prometheus alerting rules so operators don't have
+to reinvent the same panels.
+
+### Available metrics
+
+| Metric | Type | Description |
+|---|---|---|
+| `sorotrail_events_ingested_total` | Counter | Total events persisted (including idempotent upserts). |
+| `sorotrail_ingest_errors_total` | Counter | Terminal ingestion pass failures (RPC, decode, DB). |
+| `sorotrail_rpc_call_duration_seconds` | Histogram | RPC call latency (HTTP round trip + parse). |
+| `sorotrail_db_write_duration_seconds` | Histogram | Database write latency (upsert, replace-in-range). |
+| `sorotrail_db_query_duration_seconds` | HistogramVec | Database query latency, labelled by `operation`. |
+| `sorotrail_ingestion_lag_ledgers` | Gauge | Ledgers behind the chain head. |
+| `sorotrail_event_batch_writes_total` | Counter | UpsertEvents calls issued by the ingester. |
+| `sorotrail_event_batch_size` | Gauge | Current adaptive batch size per write. |
+| `sorotrail_event_backpressure_total` | Counter | Throttle sleeps between batch writes. |
+| `sorotrail_event_backpressure_seconds_total` | Counter | Cumulative seconds spent under backpressure. |
+| `http_request_duration_seconds` | HistogramVec | HTTP request duration, labelled by `route`, `method`, `status`. |
+
+### Grafana dashboard
+
+A pre-built Grafana dashboard is provided at
+[`deploy/grafana/sorotrail-dashboard.json`](deploy/grafana/sorotrail-dashboard.json).
+It contains four rows:
+
+1. **Ingestion** — lag gauge, lag trend, events/sec, errors/sec.
+2. **RPC & Network** — RPC latency percentiles, RPC calls/sec.
+3. **Store / Database** — DB write latency percentiles, query latency by operation.
+4. **Backpressure & Batch Health** — batch size, batch writes/sec, backpressure rate, backpressure duration.
+
+#### Import via UI
+
+1. Open Grafana → **Dashboards → Import**.
+2. Click **Upload JSON file** and select `deploy/grafana/sorotrail-dashboard.json`.
+3. Select your Prometheus datasource when prompted.
+4. Click **Import**.
+
+#### Import via provisioning
+
+Add to your Grafana provisioning config:
+
+```yaml
+apiVersion: 1
+providers:
+  - name: SoroTrail
+    orgId: 1
+    folder: SoroTrail
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards/sorotrail
+      foldersFromFilesStructure: false
+```
+
+Copy `deploy/grafana/sorotrail-dashboard.json` to the provisioning path.
+
+### Prometheus alerting rules
+
+Pre-built recording and alerting rules are at
+[`deploy/prometheus/sorotrail-rules.yml`](deploy/prometheus/sorotrail-rules.yml).
+They cover six alerts across the four operational concerns:
+
+| Alert | Metric | Threshold | Duration | Severity |
+|---|---|---|---|---|
+| `IngestionLagHigh` | `sorotrail_ingestion_lag_ledgers` | > 200 | 5m | warning |
+| `IngestionErrorsBurst` | `rate(sorotrail_ingest_errors_total[5m])` | > 0 | 10m | warning |
+| `RPCP99LatencyHigh` | P99 RPC call duration | > 5 s | 10m | warning |
+| `StoreWriteLatencyHigh` | P99 DB write duration | > 10 s | 10m | warning |
+| `BackpressureActive` | `rate(sorotrail_event_backpressure_total[5m])` | > 0 | 15m | warning |
+| `EventBatchSizeCritical` | `sorotrail_event_batch_size` | < 10 | 10m | critical |
+
+Each alert includes a `runbook_url` annotation pointing to this section
+and a detailed `description` explaining what it means and what to check.
+Thresholds are justified in the rules file comments.
+
+#### Loading rules into Prometheus
+
+Add to your `prometheus.yml`:
+
+```yaml
+rule_files:
+  - "deploy/prometheus/sorotrail-rules.yml"
+```
+
+Then reload Prometheus (`kill -HUP <pid>` or `POST /-/reload` if enabled).
+
+#### Verifying rules load
+
+```sh
+promtool check rules deploy/prometheus/sorotrail-rules.yml
+```
+
+### Key environment variables affecting alerts
+
+| Variable | Default | Alert it affects | Why |
+|---|---|---|---|
+| `LAG_WARN_LEDGERS` | `100` | `IngestionLagHigh` | The log-level alarm; the Prometheus alert uses 200 for a wider safety margin. |
+| `RPC_RATE_LIMIT` | `10` | `RPCP99LatencyHigh` | Lower values may cause HTTP 429s that look like latency. |
+| `RPC_MAX_ATTEMPTS` | `3` | `IngestionErrorsBurst` | More retries mask transient errors but delay the alert. |
+| `POLL_INTERVAL` | `5s` | `RPCP99LatencyHigh` | The 5 s P99 threshold is derived from this default. |
+| `WATCHED_CONTRACTS` | empty | `IngestionLagHigh`, `RPCP99LatencyHigh` | More contracts = more RPC calls = higher latency risk. |
+
 ## License
 
 [Apache-2.0](LICENSE)
