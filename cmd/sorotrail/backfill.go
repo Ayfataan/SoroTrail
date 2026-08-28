@@ -11,11 +11,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/khaylebfortune/sorotrail/internal/backfill"
-	"github.com/khaylebfortune/sorotrail/internal/config"
-	"github.com/khaylebfortune/sorotrail/internal/decode"
-	"github.com/khaylebfortune/sorotrail/internal/horizon"
-	"github.com/khaylebfortune/sorotrail/internal/store"
+	"github.com/sorotrail/sorotrail/internal/backfill"
+	"github.com/sorotrail/sorotrail/internal/config"
+	"github.com/sorotrail/sorotrail/internal/decode"
+	"github.com/sorotrail/sorotrail/internal/horizon"
+	"github.com/sorotrail/sorotrail/internal/store"
 )
 
 // runBackfill implements `sorotrail backfill`: pull historical
@@ -54,15 +54,16 @@ flags:
 		fs.PrintDefaults()
 	}
 	var (
-		contractID  = fs.String("contract", "", "contract ID to backfill events for (required, C… strkey)")
-		fromLedger  = fs.Int64("from-ledger", 0, "first ledger to backfill (inclusive, required)")
-		toLedger    = fs.Int64("to-ledger", 0, "last ledger to backfill (inclusive; 0 = no upper bound)")
-		batchSize   = fs.Int("batch-size", backfill.DefaultBatchSize, "transactions per Horizon page (max 200)")
-		rps         = fs.Float64("rps", 0, "horizon requests per second (overrides BACKFILL_RATE_RPS env)")
-		horizonURL  = fs.String("horizon-url", "", "horizon REST base URL (overrides HORIZON_URL env)")
-		includeFail = fs.Bool("include-failed", true, "include transactions whose tx-level result was failed")
-		dryRun      = fs.Bool("dry-run", false, "report what would change without writing anything")
-		restart     = fs.Bool("restart", false, "discard saved progress and start from --from-ledger")
+		contractID       = fs.String("contract", "", "contract ID to backfill events for (required, C… strkey)")
+		fromLedger       = fs.Int64("from-ledger", 0, "first ledger to backfill (inclusive, required)")
+		toLedger         = fs.Int64("to-ledger", 0, "last ledger to backfill (inclusive; 0 = no upper bound)")
+		batchSize        = fs.Int("batch-size", backfill.DefaultBatchSize, "transactions per Horizon page (max 200)")
+		rps              = fs.Float64("rps", 0, "horizon requests per second (overrides BACKFILL_RATE_RPS env)")
+		horizonURL       = fs.String("horizon-url", "", "horizon REST base URL (overrides HORIZON_URL env)")
+		includeFail      = fs.Bool("include-failed", true, "include transactions whose tx-level result was failed")
+		dryRun           = fs.Bool("dry-run", false, "report what would change without writing anything")
+		restart          = fs.Bool("restart", false, "discard saved progress and start from --from-ledger")
+		progressInterval = fs.Duration("progress-interval", 0, "emit periodic progress to stderr (e.g. 30s, 1m); 0 disables")
 	)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -89,7 +90,7 @@ flags:
 	if err != nil {
 		return err
 	}
-	log := newLogger(cfg.LogLevel)
+	log := newLogger(cfg.LogLevel, cfg.LogFormat)
 
 	// Ctrl-C stops between pages rather than killing the process, so
 	// the in-flight upsert commits cleanly and progress stays consistent.
@@ -121,6 +122,11 @@ flags:
 	st := store.NewPostgres(pool, int64(cfg.PartitionLedgerSpan))
 	hClient := horizon.NewHTTPClient(hURL, minInterval)
 
+	var prog *Progress
+	if *progressInterval > 0 {
+		prog = NewProgress("backfill", *progressInterval)
+	}
+
 	b := backfill.New(hClient, st, decode.XDRDecoder{}, log, backfill.Options{
 		ContractID:    *contractID,
 		FromLedger:    *fromLedger,
@@ -131,6 +137,11 @@ flags:
 		IncludeFailed: *includeFail,
 		DryRun:        *dryRun,
 		MaxBackoff:    backfill.DefaultMaxBackoff,
+		Progress: func(n int64) {
+			if prog != nil {
+				prog.Tick(n)
+			}
+		},
 	})
 	if *restart {
 		// Drop any saved state that's now stale: a fresh Start happens
@@ -150,6 +161,9 @@ flags:
 	}
 
 	sum, err := runBackfillWithRetry(ctx, b, log)
+	if prog != nil {
+		prog.Report(sum.Completed)
+	}
 	if err != nil {
 		return err
 	}
