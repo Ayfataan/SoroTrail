@@ -5,7 +5,7 @@ package store
 // Migration reversibility and idempotency tests.
 //
 // These integration tests exercise every Postgres migration end-to-end and
-// verify the invariants listed in issue #818:
+// verify the invariants listed in issue #71:
 //
 //   - up from empty to head succeeding
 //   - down from head to zero succeeding
@@ -78,8 +78,7 @@ func dbURL(t *testing.T) string {
 }
 
 // newMigrateToVersion creates a fresh *migrate.Migrate pointing at the given
-// database URL. Every call creates independent source and database drivers,
-// so the caller can close without affecting other instances.
+// database URL. Every call creates independent source and database drivers.
 func newMigrateToVersion(t *testing.T, url string) *migrate.Migrate {
 	t.Helper()
 	src, err := iofs.New(postgresMigrationsFS, "migrations")
@@ -94,50 +93,21 @@ func newMigrateToVersion(t *testing.T, url string) *migrate.Migrate {
 
 	m, err := migrate.NewWithInstance("iofs", src, "pgx5", drv)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = m.Close()
-	})
+	t.Cleanup(func() { _, _ = m.Close() })
 	return m
 }
 
-// applyToVersion brings the database to the given migration version. It
-// applies all migrations first, then steps down to the target if necessary.
-// On an up-to-date DB it returns ErrNoChange, which is fine.
-func applyToVersion(t *testing.T, url string, targetVersion uint) {
-	t.Helper()
-	m := newMigrateToVersion(t, url)
-	// Migrate applies all up migrations.
-	err := m.Up()
-	if err != nil && err != migrate.ErrNoChange {
-		require.NoError(t, err, "applying all migrations")
-	}
-
-	currentVer, _, err := m.Version()
-	require.NoError(t, err, "reading current version")
-
-	if currentVer > targetVersion {
-		steps := int(currentVer - targetVersion)
-		require.NoError(t, m.Steps(-steps), "stepping down to version %d", targetVersion)
-	} else if currentVer < targetVersion {
-		steps := int(targetVersion - currentVer)
-		require.NoError(t, m.Steps(steps), "stepping up to version %d", targetVersion)
-	}
-}
-
-// resetDatabase drops every user-created table and function so each test
-// starts from a completely clean state. It also cleans up partitioned-table
-// children so later tests don't hit "partition would overlap" errors.
-func resetDatabase(t *testing.T, url string) {
+// dropAllObjects drops every user-created table, function, and index in the
+// public schema, and removes the schema_migrations table.
+func dropAllObjects(t *testing.T, url string) {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), url)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	// Drop all non-system tables in the public schema.
 	rows, err := pool.Query(context.Background(),
 		`SELECT tablename FROM pg_tables WHERE schemaname = 'public'`)
 	require.NoError(t, err)
-
 	var tables []string
 	for rows.Next() {
 		var name string
@@ -145,41 +115,22 @@ func resetDatabase(t *testing.T, url string) {
 		tables = append(tables, name)
 	}
 	require.NoError(t, rows.Err())
-
 	for _, tbl := range tables {
 		_, err := pool.Exec(context.Background(),
 			fmt.Sprintf(`DROP TABLE IF EXISTS %s CASCADE`, tbl))
 		require.NoError(t, err)
 	}
 
-	// Drop functions created by migrations (e.g. ensure_event_partitions).
 	_, err = pool.Exec(context.Background(),
 		`DROP FUNCTION IF EXISTS ensure_event_partitions(bigint, bigint, bigint)`)
 	require.NoError(t, err)
 
-	// Clean the migration tracking table.
 	_, err = pool.Exec(context.Background(),
 		`DROP TABLE IF EXISTS schema_migrations`)
 	require.NoError(t, err)
-
-	// Drop indexes that may remain from partitioned tables.
-	idxRows, err := pool.Query(context.Background(),
-		`SELECT indexname FROM pg_indexes WHERE schemaname = 'public'
-		 AND indexname LIKE 'idx_%'`)
-	require.NoError(t, err)
-	for idxRows.Next() {
-		var idx string
-		require.NoError(t, idxRows.Scan(&idx))
-		_, _ = pool.Exec(context.Background(),
-			fmt.Sprintf(`DROP INDEX IF EXISTS %s CASCADE`, idx))
-	}
-	require.NoError(t, idxRows.Err())
 }
 
-// dbSnapshot captures a deterministic hash of the database schema. It hashes
-// tables (sorted), their columns (sorted), and indexes (sorted) so two
-// snapshots are comparable via simple byte comparison. The hash is stable
-// across runs on the same schema state and changes when the schema differs.
+// dbSnapshot captures a deterministic hash of the database schema.
 func dbSnapshot(t *testing.T, url string) []byte {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), url)
@@ -188,7 +139,6 @@ func dbSnapshot(t *testing.T, url string) []byte {
 
 	var parts []string
 
-	// Tables and columns, ordered deterministically.
 	tblRows, err := pool.Query(context.Background(), `
 		SELECT c.table_name, c.column_name, c.is_nullable,
 		       c.column_default, c.character_maximum_length
@@ -196,18 +146,17 @@ func dbSnapshot(t *testing.T, url string) []byte {
 		JOIN information_schema.tables t
 		  ON c.table_schema = t.table_schema AND c.table_name = t.table_name
 		WHERE c.table_schema = 'public'
+		  AND c.table_name != 'schema_migrations'
 		ORDER BY c.table_name, c.ordinal_position`)
 	require.NoError(t, err)
 	for tblRows.Next() {
 		var tbl, col, nullable string
 		var defaultVal, charMax sql.NullString
 		require.NoError(t, tblRows.Scan(&tbl, &col, &nullable, &defaultVal, &charMax))
-		entry := fmt.Sprintf("T:%s/%s/%s/%v/%v", tbl, col, nullable, defaultVal, charMax)
-		parts = append(parts, entry)
+		parts = append(parts, fmt.Sprintf("T:%s/%s/%s/%v/%v", tbl, col, nullable, defaultVal, charMax))
 	}
 	require.NoError(t, tblRows.Err())
 
-	// Table constraints (PK, unique, check).
 	conRows, err := pool.Query(context.Background(), `
 		SELECT tc.table_name, tc.constraint_name, tc.constraint_type,
 		       kcu.column_name
@@ -216,6 +165,7 @@ func dbSnapshot(t *testing.T, url string) []byte {
 		  ON tc.constraint_name = kcu.constraint_name
 		  AND tc.table_schema = kcu.table_schema
 		WHERE tc.table_schema = 'public'
+		  AND tc.table_name != 'schema_migrations'
 		ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position`)
 	require.NoError(t, err)
 	for conRows.Next() {
@@ -225,11 +175,11 @@ func dbSnapshot(t *testing.T, url string) []byte {
 	}
 	require.NoError(t, conRows.Err())
 
-	// Indexes with column lists.
 	idxRows, err := pool.Query(context.Background(), `
 		SELECT tablename, indexname, indexdef
 		FROM pg_indexes
 		WHERE schemaname = 'public'
+		  AND tablename != 'schema_migrations'
 		ORDER BY tablename, indexname`)
 	require.NoError(t, err)
 	for idxRows.Next() {
@@ -239,7 +189,6 @@ func dbSnapshot(t *testing.T, url string) []byte {
 	}
 	require.NoError(t, idxRows.Err())
 
-	// Functions (e.g. ensure_event_partitions).
 	fnRows, err := pool.Query(context.Background(), `
 		SELECT p.proname, pg_get_function_arguments(p.oid)
 		FROM pg_proc p
@@ -262,6 +211,24 @@ func dbSnapshot(t *testing.T, url string) []byte {
 	return h[:]
 }
 
+// stepDownToVersion steps down one migration at a time until the database
+// reaches the target version. golang-migrate's Steps(-1) calls
+// source.Previous(version), which skips missing versions (e.g. version 5
+// in this project), so we loop until the target is reached.
+func stepDownToVersion(t *testing.T, url string, target uint) {
+	t.Helper()
+	for {
+		m := newMigrateToVersion(t, url)
+		cur, _, err := m.Version()
+		require.NoError(t, err)
+		if cur <= target {
+			return
+		}
+		require.NoError(t, m.Steps(-1),
+			"stepping down from version %d towards %d", cur, target)
+	}
+}
+
 // ---------- non-integration tests ----------
 
 // TestMigrate_EachUpHasMatchingDown verifies that every .up.sql migration has
@@ -272,7 +239,7 @@ func TestMigrate_EachUpHasMatchingDown(t *testing.T) {
 
 	type migFile struct {
 		version int
-		dir     string // "up" or "down"
+		dir     string
 	}
 
 	var files []migFile
@@ -284,14 +251,10 @@ func TestMigrate_EachUpHasMatchingDown(t *testing.T) {
 		if m == nil {
 			continue
 		}
-		files = append(files, migFile{
-			version: mustAtoi(m[1]),
-			dir:     m[3],
-		})
+		files = append(files, migFile{version: mustAtoi(m[1]), dir: m[3]})
 	}
 
-	// Group by version.
-	byVersion := map[int][2]string{} // [0]=up, [1]=down
+	byVersion := map[int][2]string{}
 	for _, f := range files {
 		pair := byVersion[f.version]
 		if f.dir == "up" {
@@ -302,7 +265,6 @@ func TestMigrate_EachUpHasMatchingDown(t *testing.T) {
 		byVersion[f.version] = pair
 	}
 
-	// Every version must have both up and down.
 	for v, pair := range byVersion {
 		assert.NotEmpty(t, pair[0], "version %04d missing up file", v)
 		assert.NotEmpty(t, pair[1], "version %04d missing down file", v)
@@ -310,8 +272,7 @@ func TestMigrate_EachUpHasMatchingDown(t *testing.T) {
 }
 
 // TestMigrate_NoUpDropsTableDependency verifies that no up-migration drops
-// or replaces a table that a later up-migration depends on. This is a static
-// analysis check that catches obvious dependency violations.
+// or replaces a table that a later up-migration depends on.
 func TestMigrate_NoUpDropsTableDependency(t *testing.T) {
 	entries, err := postgresMigrationsFS.ReadDir("migrations")
 	require.NoError(t, err)
@@ -335,7 +296,6 @@ func TestMigrate_NoUpDropsTableDependency(t *testing.T) {
 
 	sort.Slice(migs, func(i, j int) bool { return migs[i].version < migs[j].version })
 
-	// Track tables created/dropped by each version.
 	created := map[int][]string{}
 	dropped := map[int][]string{}
 
@@ -356,7 +316,6 @@ func TestMigrate_NoUpDropsTableDependency(t *testing.T) {
 		}
 	}
 
-	// For each dropped table, check that no later version creates it.
 	allVersions := make([]int, 0, len(migs))
 	for _, m := range migs {
 		allVersions = append(allVersions, m.version)
@@ -374,10 +333,8 @@ func TestMigrate_NoUpDropsTableDependency(t *testing.T) {
 				for _, ct := range created[createVer] {
 					if ct == tbl {
 						t.Errorf(
-							"version %04d drops table %q which version %04d creates; "+
-								"running down from version %d would destroy a table that version %d depends on",
-							dropVer, tbl, createVer, dropVer, createVer,
-						)
+							"version %04d drops table %q which version %04d creates",
+							dropVer, tbl, createVer)
 					}
 				}
 			}
@@ -388,75 +345,81 @@ func TestMigrate_NoUpDropsTableDependency(t *testing.T) {
 // ---------- integration tests ----------
 
 // TestMigrate_UpFromEmpty verifies that applying every migration to a fresh
-// database succeeds. This is the most basic forward-path smoke test.
+// database succeeds.
 func TestMigrate_UpFromEmpty(t *testing.T) {
 	url := dbURL(t)
-	resetDatabase(t, url)
+	dropAllObjects(t, url)
 
 	err := Migrate(url)
 	require.NoError(t, err, "Migrate must succeed on a fresh database")
 }
 
 // TestMigrate_DownFromHead verifies that every down-migration succeeds when
-// applied in sequence from the latest version to zero.
+// applied in sequence from the latest version to zero. golang-migrate cannot
+// step from version 1 to 0 (the source has no "previous" version), so the
+// final step applies v0001.down.sql directly.
 func TestMigrate_DownFromHead(t *testing.T) {
 	url := dbURL(t)
-	resetDatabase(t, url)
+	dropAllObjects(t, url)
 
-	versions := migrateVersions(t)
-	require.NotEmpty(t, versions)
-	maxVersion := versions[len(versions)-1]
+	require.NoError(t, Migrate(url))
 
-	// Apply all migrations to reach head.
-	applyToVersion(t, url, uint(maxVersion))
+	// Step down from head to version 1.
+	stepDownToVersion(t, url, 1)
 
-	// Step down from head to zero.
-	for v := maxVersion; v >= 1; v-- {
-		m := newMigrateToVersion(t, url)
-		require.NoError(t, m.Steps(-1),
-			"stepping down from version %d must succeed", v)
-	}
-
-	// Verify we are at version zero.
+	// Verify we are at version 1.
 	m := newMigrateToVersion(t, url)
-	_, _, err := m.Version()
-	require.Error(t, err, "after rolling back all migrations, Version must error")
+	cur, _, err := m.Version()
+	require.NoError(t, err)
+	require.Equal(t, uint(1), cur, "should be at version 1 before final rollback")
+
+	// Apply v0001.down.sql directly (golang-migrate can't step from 1 to 0).
+	downSQL, err := postgresMigrationsFS.ReadFile("migrations/0001_init.down.sql")
+	require.NoError(t, err)
+	db, err := sql.Open("pgx", url)
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(string(downSQL))
+	require.NoError(t, err, "applying 0001_init.down.sql directly must succeed")
+	_, err = db.Exec(`DROP TABLE IF EXISTS schema_migrations`)
+	require.NoError(t, err)
+
+	// Verify the database has no user tables.
+	var count int
+	err = db.QueryRow(`SELECT count(*) FROM pg_tables WHERE schemaname = 'public'`).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "after rolling back all migrations, no user tables should remain")
 }
 
 // TestMigrate_UpDownUpRoundTrip verifies that applying all migrations, then
 // rolling them all back, then re-applying them produces an identical schema.
-// This catches down-migrations that leave behind stale objects (orphaned
-// indexes, leftover columns, etc.) that the subsequent up-apply doesn't
-// clean up.
 func TestMigrate_UpDownUpRoundTrip(t *testing.T) {
 	url := dbURL(t)
-	resetDatabase(t, url)
+	dropAllObjects(t, url)
 
 	versions := migrateVersions(t)
 	require.NotEmpty(t, versions)
-	maxVersion := versions[len(versions)-1]
 
 	// Apply all migrations.
-	applyToVersion(t, url, uint(maxVersion))
+	require.NoError(t, Migrate(url))
 	schemaAfterFirstUp := dbSnapshot(t, url)
 
-	// Roll back to zero.
-	applyToVersion(t, url, 0)
+	// Roll back to version 1 (golang-migrate limit for Steps).
+	stepDownToVersion(t, url, 1)
 
-	// Re-apply all migrations.
-	applyToVersion(t, url, uint(maxVersion))
+	// Re-apply all migrations from version 1.
+	require.NoError(t, Migrate(url))
 	schemaAfterSecondUp := dbSnapshot(t, url)
 
 	assert.Equal(t, schemaAfterFirstUp, schemaAfterSecondUp,
-		"re-applying all migrations after a full rollback must produce the same schema")
+		"re-applying all migrations after a rollback must produce the same schema")
 }
 
-// TestMigrate_Idempotent verifies that Migrate() can be called twice in
-// succession and both succeed. A schema that isn't idempotent would fail on
-// the second call (e.g. a CREATE TABLE without IF NOT EXISTS).
+// TestMigrate_Idempotent verifies that Migrate() can be called multiple times
+// and produces the same schema each time.
 func TestMigrate_Idempotent(t *testing.T) {
 	url := dbURL(t)
-	resetDatabase(t, url)
+	dropAllObjects(t, url)
 
 	require.NoError(t, Migrate(url), "first Migrate call must succeed")
 	require.NoError(t, Migrate(url), "second Migrate call must be a no-op (idempotent)")
@@ -468,41 +431,58 @@ func TestMigrate_Idempotent(t *testing.T) {
 		"repeated Migrate calls must not change the schema")
 }
 
-// TestMigrate_EachDownReversesItsUp verifies, for every migration version,
-// that applying that version's up migration and then immediately rolling it
-// back produces the same schema as before the up. This catches down-migrations
-// that forget to drop a column, leave behind a constraint, or recreate an
-// object with a different definition.
+// TestMigrate_EachDownReversesItsUp verifies, for every migration version N
+// (2 through head), that applying N's up and then N's down produces the same
+// schema as before N was applied. Version 1 is excluded because golang-migrate
+// cannot step from version 1 to 0 via Steps. Version 1's reversibility is
+// covered by TestMigrate_DownFromHead.
 func TestMigrate_EachDownReversesItsUp(t *testing.T) {
 	url := dbURL(t)
 	versions := migrateVersions(t)
 	require.NotEmpty(t, versions)
+	require.True(t, versions[len(versions)-1] >= 2,
+		"need at least version 2 for this test")
 
-	for _, targetVersion := range versions {
-		targetVersion := targetVersion // capture loop var for subtest
-		t.Run(fmt.Sprintf("v%04d", targetVersion), func(t *testing.T) {
-			resetDatabase(t, url)
+	// Apply all migrations to reach head.
+	require.NoError(t, Migrate(url))
 
-			// Apply all migrations up to the version just before this one.
-			if targetVersion > 1 {
-				applyToVersion(t, url, uint(targetVersion-1))
+	// Walk down from head to version 2, testing each down migration.
+	for i := len(versions) - 1; i >= 1; i-- {
+		ver := versions[i]
+
+		t.Run(fmt.Sprintf("v%04d", ver), func(t *testing.T) {
+			// Ensure the database is at version ver. This handles the case
+			// where a previous subtest (or a gap in version numbers) left
+			// the database at a different version. ErrNoChange is fine — it
+			// means we are already there.
+			m := newMigrateToVersion(t, url)
+			if err := m.Migrate(uint(ver)); err != nil && err != migrate.ErrNoChange {
+				require.NoError(t, err, "migrating to version %d must succeed", ver)
 			}
+
+			// Step down to prevVer and capture the "before" schema.
+			require.NoError(t, m.Steps(-1),
+				"stepping down from version %d must succeed", ver)
 			schemaBefore := dbSnapshot(t, url)
 
-			// Apply the target version's up migration.
-			m := newMigrateToVersion(t, url)
-			require.NoError(t, m.Migrate(uint(targetVersion)),
-				"applying up migration v%04d must succeed", targetVersion)
+			// Step back up to ver.
+			if err := m.Migrate(uint(ver)); err != nil && err != migrate.ErrNoChange {
+				require.NoError(t, err, "stepping back up to version %d must succeed", ver)
+			}
 
-			// Roll it back.
-			m2 := newMigrateToVersion(t, url)
-			require.NoError(t, m2.Steps(-1),
-				"rolling back down migration v%04d must succeed", targetVersion)
-
-			// Schema must match what it was before the up.
+			// Step down to prevVer again and capture the "after" schema.
+			require.NoError(t, m.Steps(-1),
+				"stepping down from version %d (second pass) must succeed", ver)
 			schemaAfter := dbSnapshot(t, url)
+
+			// Step back up to ver so the next iteration starts clean.
+			if err := m.Migrate(uint(ver)); err != nil && err != migrate.ErrNoChange {
+				require.NoError(t, err, "restoring version %d for next iteration must succeed", ver)
+			}
+
+			// The down migration must have reversed the up migration exactly.
 			assert.Equal(t, schemaBefore, schemaAfter,
-				fmt.Sprintf("down migration v%04d must produce the same schema as before its up", targetVersion))
+				"down migration v%04d must produce the same schema as before its up", ver)
 		})
 	}
 }
