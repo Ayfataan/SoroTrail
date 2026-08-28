@@ -12,6 +12,7 @@ BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown
 LDFLAGS := -ldflags="-X github.com/sorotrail/sorotrail/internal/buildinfo.Version=$(VERSION) -X github.com/sorotrail/sorotrail/internal/buildinfo.Commit=$(COMMIT) -X github/sorotrail/sorotrail/internal/buildinfo.BuildDate=$(BUILD_DATE)"
 
 .PHONY: help build build-all build-all-integration run test test-fast test-db test-ci test-integration simtest simtest-long vet vet-integration lint bench bench-ci ci cover cover-html migrate-up migrate-down seed docker-up docker-down spec clean
+.PHONY: build build-all build-all-integration run test test-fast test-db test-integration vet vet-integration test-ci lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec client ci
 
 # ── Self-documenting help ────────────────────────────────────────────────────
 # Every target that starts with a double-hash comment (##) is listed by
@@ -99,6 +100,13 @@ ci: build-all vet test-ci bench-ci build-all-integration vet-integration test-in
 # ── Coverage ─────────────────────────────────────────────────────────────────
 
 cover: ## Run tests with coverage profile
+# Regenerate the versioned API client in pkg/client from api/openapi.yaml.
+# Run this after changing the spec, or pkg/client's drift test fails the
+# build (see pkg/client/README.md).
+client:
+	go run ./cmd/clientgen
+
+cover:
 	go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
 cover-html: cover ## Open coverage report in browser
