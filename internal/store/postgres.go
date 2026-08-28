@@ -11,24 +11,36 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ErrNotFound is returned when a lookup matches no rows.
+// ErrNotFound is returned by [Store] lookup methods when no matching row
+// exists. Callers should use errors.Is to check for it.
+//
+// Returned by: [Store.GetEvent], [Store.GetIngestionState],
+// [Store.GetAuditState], [Store.ListOpenFindingsByRange],
+// [Postgres.GetReplayState].
 var ErrNotFound = errors.New("not found")
 
-// DefaultQueryLimit applies when EventFilter.Limit is unset; MaxQueryLimit
-// caps requested page sizes.
+// DefaultQueryLimit is the page size used by [Store.QueryEvents] when
+// [EventFilter.Limit] is unset (0). MaxQueryLimit caps requested page
+// sizes; requests for more are silently clamped.
 const (
 	DefaultQueryLimit = 50
 	MaxQueryLimit     = 200
 )
 
-// Postgres implements Store on a pgx connection pool.
+// Postgres implements [Store] on a pgx connection pool. It is the only
+// production implementation of the [Store] interface.
+//
+// Create an instance with [NewPostgres]. The caller owns the pool's
+// lifecycle and must close it when done.
 type Postgres struct {
 	pool *pgxpool.Pool
 }
 
+// Compile-time assertion that *Postgres implements Store.
 var _ Store = (*Postgres)(nil)
 
-// NewPostgres wraps an existing pool. The caller owns the pool's lifecycle.
+// NewPostgres wraps an existing pgxpool.Pool. The caller owns the pool's
+// lifecycle — closing it also closes all connections managed by the pool.
 func NewPostgres(pool *pgxpool.Pool) *Postgres {
 	return &Postgres{pool: pool}
 }

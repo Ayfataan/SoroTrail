@@ -24,14 +24,20 @@ import (
 // advisory locks on a shared database.
 const ReplayAdvisoryLockKey int64 = 0x536F726F5265706C // "SoroRepl"
 
-// ErrReplayLocked is returned when another replay already holds the advisory
-// lock.
+// ErrReplayLocked is returned by [Postgres.AcquireReplayLock] when another
+// replay already holds the advisory lock. The caller should either wait and
+// retry or abort.
 var ErrReplayLocked = errors.New("another replay is already running")
 
-// ReplayLock is a held replay lock. It is an interface so the replay engine
-// can be tested against a fake store.
+// ReplayLock is a held replay advisory lock. It is an interface so the
+// replay engine can be tested against a fake store.
+//
+// Call [Postgres.AcquireReplayLock] to obtain one. The caller must call
+// [ReplayLock.Release] when done; this also returns the underlying
+// connection to the pool.
 type ReplayLock interface {
-	// Release drops the lock. It is safe to call more than once.
+	// Release drops the advisory lock and returns the pooled connection.
+	// It is safe to call more than once.
 	Release()
 }
 
@@ -51,9 +57,10 @@ func (l *pgReplayLock) Release() {
 }
 
 // AcquireReplayLock takes the replay advisory lock without blocking,
-// returning ErrReplayLocked if another replay holds it. The lock lives on a
-// dedicated pooled connection that the caller must Release; ingestion and
-// API queries continue to use the rest of the pool untouched.
+// returning [ErrReplayLocked] if another replay holds it. The lock lives on
+// a dedicated pooled connection that the caller must Release via the returned
+// [ReplayLock.Release]; ingestion and API queries continue to use the rest
+// of the pool untouched.
 func (p *Postgres) AcquireReplayLock(ctx context.Context) (ReplayLock, error) {
 	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
@@ -71,8 +78,8 @@ func (p *Postgres) AcquireReplayLock(ctx context.Context) (ReplayLock, error) {
 	return &pgReplayLock{conn: conn}, nil
 }
 
-// GetReplayState returns the persisted replay progress, or ErrNotFound when
-// no replay has ever run.
+// GetReplayState returns the persisted replay progress, or [ErrNotFound]
+// when no replay has ever run.
 func (p *Postgres) GetReplayState(ctx context.Context) (ReplayState, error) {
 	var s ReplayState
 	err := p.pool.QueryRow(ctx, `
@@ -91,7 +98,9 @@ func (p *Postgres) GetReplayState(ctx context.Context) (ReplayState, error) {
 }
 
 // StartReplayState (re)initializes the progress row for a fresh run over
-// [fromLedger, toLedger], discarding any previous run's progress.
+// [fromLedger, toLedger], discarding any previous run's progress. This
+// must be called before the first call to [Postgres.NextReplayBatch] for a
+// new replay.
 func (p *Postgres) StartReplayState(ctx context.Context, fromLedger, toLedger int64) error {
 	_, err := p.pool.Exec(ctx, `
 		INSERT INTO replay_state
@@ -115,9 +124,12 @@ func (p *Postgres) StartReplayState(ctx context.Context, fromLedger, toLedger in
 	return nil
 }
 
-// NextReplayBatch returns up to limit events from [fromLedger, toLedger]
-// ordered by ID, starting after afterID. Events are returned whether or not
-// they carry raw XDR — the caller counts the ones it has to skip.
+// NextReplayBatch returns up to limit [DecodedEvent]s from the inclusive
+// ledger range [fromLedger, toLedger] ordered by ID, starting after afterID.
+// Events are returned whether or not they carry raw XDR — the caller counts
+// the ones it has to skip (those where [DecodedEvent.HasRawXDR] is false).
+//
+// Pass an empty afterID to start from the beginning of the range.
 func (p *Postgres) NextReplayBatch(ctx context.Context, fromLedger, toLedger int64, afterID string, limit int) ([]DecodedEvent, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT id, contract_id, ledger, raw_topic_xdr, raw_value_xdr, topics, value
