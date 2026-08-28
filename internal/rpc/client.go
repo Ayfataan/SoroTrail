@@ -30,8 +30,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/sorotrail/sorotrail/internal/metrics"
 )
 
@@ -215,41 +213,33 @@ func (c *HTTPClient) GetEvents(ctx context.Context, req GetEventsRequest) (GetEv
 	}
 
 	var resp GetEventsResponse
-	start := time.Now()
 	err := c.call(ctx, "getEvents", req, &resp)
-	metrics.RPCCallLatency.Observe(time.Since(start).Seconds())
 	if err != nil && isXDRFormatRejected(err) {
-		// Older server: remember and retry once without the param.
+		// Older server: remember and retry once without the param. The
+		// retried call observes its own latency via call() — no manual
+		// observation here.
 		c.xdrJSONUnsupported.Store(true)
 		req.XDRFormat = ""
-		start = time.Now()
 		err = c.call(ctx, "getEvents", req, &resp)
-		metrics.RPCCallLatency.Observe(time.Since(start).Seconds())
 	}
 	return resp, err
 }
 
 func (c *HTTPClient) GetLatestLedger(ctx context.Context) (LatestLedger, error) {
 	var resp LatestLedger
-	start := time.Now()
 	err := c.call(ctx, "getLatestLedger", nil, &resp)
-	metrics.RPCCallLatency.Observe(time.Since(start).Seconds())
 	return resp, err
 }
 
 func (c *HTTPClient) GetHealth(ctx context.Context) (Health, error) {
 	var resp Health
-	start := time.Now()
 	err := c.call(ctx, "getHealth", nil, &resp)
-	metrics.RPCCallLatency.Observe(time.Since(start).Seconds())
 	return resp, err
 }
 
 func (c *HTTPClient) GetLedgerEntries(ctx context.Context, req GetLedgerEntriesRequest) (GetLedgerEntriesResponse, error) {
 	var resp GetLedgerEntriesResponse
-	start := time.Now()
 	err := c.call(ctx, "getLedgerEntries", req, &resp)
-	metrics.RPCCallLatency.Observe(time.Since(start).Seconds())
 	return resp, err
 }
 
@@ -280,9 +270,21 @@ type response struct {
 	Error   *Error          `json:"error"`
 }
 
-func (c *HTTPClient) call(ctx context.Context, method string, params, result any) error {
-	timer := prometheus.NewTimer(metrics.RPCCallLatency)
-	defer timer.ObserveDuration()
+// call is the single choke point every JSON-RPC request flows through, so
+// it is also the single place RPC latency is observed. Each call records
+// its duration once, labelled by method and outcome (success | error); the
+// per-method wrappers never observe on their own, so a call is counted
+// exactly once even when GetEvents retries internally after an XDR-format
+// rejection.
+func (c *HTTPClient) call(ctx context.Context, method string, params, result any) (err error) {
+	start := time.Now()
+	defer func() {
+		outcome := "success"
+		if err != nil {
+			outcome = "error"
+		}
+		metrics.RPCCallLatency.WithLabelValues(method, outcome).Observe(time.Since(start).Seconds())
+	}()
 
 	if err := c.limiter.Wait(ctx); err != nil {
 		return err
