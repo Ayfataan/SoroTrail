@@ -1,5 +1,17 @@
 // Package config loads and validates SoroTrail's configuration from
 // environment variables.
+//
+// The entry point is [Load], which parses the environment into a [Config]
+// and calls [Config.Validate]. Every field is settable via the environment
+// variable named in its `env` tag; see .env.example for documentation.
+//
+// Non-obvious contracts:
+//   - DATABASE_URL is the only required variable; all others have safe
+//     defaults.
+//   - [Config.Validate] is idempotent and can be called again after
+//     programmatic mutation.
+//   - [ValidContractID] checks shape only (C prefix, 56 base32 chars),
+//     not the checksum.
 package config
 
 import (
