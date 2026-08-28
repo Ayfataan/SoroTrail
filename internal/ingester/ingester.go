@@ -526,7 +526,7 @@ func (ing *Ingester) runOnce(ctx context.Context) (caughtUp bool, err error) {
 	if len(batches) == 1 {
 		return ing.singlePage(ctx, startLedger, cursor, batches[0])
 	}
-	return ing.windowSweepUnwatched(ctx, startLedger, batches)
+	return ing.windowSweep(ctx, startLedger, batches)
 }
 
 func (ing *Ingester) singlePage(ctx context.Context, startLedger uint32, cursor string, filters []rpc.EventFilter) (bool, error) {
@@ -802,12 +802,6 @@ func (ing *Ingester) windowSweep(ctx context.Context, start uint32, batches [][]
 	}
 	ing.setIngestionLag(int64(health.LatestLedger), lastIngested)
 	return end >= health.LatestLedger, nil
-}
-
-// windowSweepUnwatched delegates to the existing windowSweep that uses the
-// single global ingestion_state row — backward-compatible behavior unchanged.
-func (ing *Ingester) windowSweepUnwatched(ctx context.Context, start uint32, batches [][]rpc.EventFilter) (bool, error) {
-	return ing.windowSweep(ctx, start, batches)
 }
 
 // sweepBatch pages one filter batch through [start, end]. Errors are
