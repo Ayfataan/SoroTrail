@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -167,9 +168,12 @@ func (s *Server) SetMetricsEnabled(enabled bool) {
 }
 
 // maxLimit is the API's upper bound for page-size parameters (limit and
-// recent). It is set once at startup via SetMaxLimit (driven by the
+// recent); values above it are rejected with 400 before the store is
+// consulted. It is set once at startup via SetMaxLimit (driven by the
 // API_MAX_LIMIT env var) before any requests are served so no mutex is
-// needed. Default 500.
+// needed. Default 500 — keep it at or below store.MaxQueryLimit: the store
+// hard-clamps every query at that constant, so an API_MAX_LIMIT above 500
+// accepts limits the store then silently truncates.
 var maxLimit = 500
 
 // SetMaxLimit configures the API's maximum page size for list endpoints.
@@ -350,7 +354,7 @@ func (s *Server) router() chi.Router {
 	// collector (hand-built Server) answers 503 rather than 404.
 	r.Get("/metrics", func(w http.ResponseWriter, req *http.Request) {
 		if s.metrics == nil {
-			http.Error(w, "metrics not enabled", http.StatusServiceUnavailable)
+			writeError(w, http.StatusServiceUnavailable, errors.New("metrics not enabled"))
 			return
 		}
 		s.metrics.Handler().ServeHTTP(w, req)

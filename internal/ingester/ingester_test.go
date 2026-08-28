@@ -1246,7 +1246,7 @@ func TestWindowSweep_ParallelBatchesReclampsOnOOR(t *testing.T) {
 		},
 	}
 	ing := newTestIngester(client, st, Options{
-		StartLedger:      100,
+		StartLedger:      40_000,
 		SweepWindow:      1_000,
 		PageLimit:        100,
 		SweepConcurrency: 4,
@@ -1791,4 +1791,40 @@ func TestRun_EmitsStartedAndStoppedLogs(t *testing.T) {
 	}
 	assert.Equal(t, 1, started, "exactly one started line")
 	assert.Equal(t, 1, stopped, "exactly one stopped line")
+}
+
+func TestColdStart_ExplicitStartLedgerRejectedWhenBelowRetention(t *testing.T) {
+	client := &mockRPC{
+		health:      rpc.Health{Status: "healthy", LatestLedger: 50_000, OldestLedger: 40_000},
+		eventsResps: []rpc.GetEventsResponse{{LatestLedger: 50_000}},
+	}
+	ing := newTestIngester(client, newMockStore(), Options{StartLedger: 100})
+
+	_, err := ing.runOnce(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "below the RPC's oldest retained ledger")
+}
+
+func TestColdStart_RelativeOffsetResolved(t *testing.T) {
+	client := &mockRPC{
+		health:      rpc.Health{Status: "healthy", LatestLedger: 100_000, OldestLedger: 10},
+		eventsResps: []rpc.GetEventsResponse{{LatestLedger: 100_000}},
+	}
+	ing := newTestIngester(client, newMockStore(), Options{StartLedgerRaw: "latest-5000"})
+
+	_, err := ing.runOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, uint32(95_000), client.eventsRequests[0].StartLedger)
+}
+
+func TestColdStart_RelativeOffsetRejectedWhenBelowRetention(t *testing.T) {
+	client := &mockRPC{
+		health:      rpc.Health{Status: "healthy", LatestLedger: 50_000, OldestLedger: 40_000},
+		eventsResps: []rpc.GetEventsResponse{{LatestLedger: 50_000}},
+	}
+	ing := newTestIngester(client, newMockStore(), Options{StartLedgerRaw: "latest-20000"})
+
+	_, err := ing.runOnce(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "below the RPC's oldest retained ledger")
 }
