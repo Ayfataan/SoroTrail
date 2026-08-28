@@ -246,7 +246,7 @@ func insertEventsBatch(events []Event, onUpdate bool) *pgx.Batch {
 				`+conflict,
 				e.ID, e.ContractID, e.Ledger, e.Type, e.TxHash, e.TxIndex,
 				e.OpIndex, e.InSuccessfulCall, e.Topics, e.Value, e.CreatedAt,
-				nullableTextArray(e.RawTopicXDR), nullableText(e.RawValueXDR),
+				nullableStringSlice(e.RawTopicXDR), nullableText(e.RawValueXDR),
 			)
 		} else {
 			batch.Queue(`
