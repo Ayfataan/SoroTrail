@@ -20,7 +20,12 @@ import (
 	"github.com/sorotrail/sorotrail/internal/metrics"
 )
 
-// ErrNotFound is returned when a lookup matches no rows.
+// ErrNotFound is returned by [Store] lookup methods when no matching row
+// exists. Callers should use errors.Is to check for it.
+//
+// Returned by: [Store.GetEvent], [Store.GetIngestionState],
+// [Store.GetAuditState], [Store.ListOpenFindingsByRange],
+// [Postgres.GetReplayState].
 var ErrNotFound = errors.New("not found")
 
 // ErrInvalidCursor is returned when a pagination cursor is malformed for the
@@ -36,7 +41,11 @@ const (
 	poolReconnectMaxBackoff  = 30 * time.Second
 )
 
-// Postgres implements Store on a pgx connection pool.
+// Postgres implements [Store] on a pgx connection pool. It is the only
+// production implementation of the [Store] interface.
+//
+// Create an instance with [NewPostgres]. The caller owns the pool's
+// lifecycle and must close it when done.
 type Postgres struct {
 	pool          *pgxpool.Pool
 	partitionSpan int64
@@ -49,6 +58,7 @@ type Postgres struct {
 	stopHealthCk  context.CancelFunc
 }
 
+// Compile-time assertion that *Postgres implements Store.
 var _ Store = (*Postgres)(nil)
 
 // NewPostgres wraps an existing pool. The caller owns the pool's lifecycle.
