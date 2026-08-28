@@ -10,6 +10,10 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/khaylebfortune/sorotrail/internal/broadcast"
 	"github.com/khaylebfortune/sorotrail/internal/decode"
 	"github.com/khaylebfortune/sorotrail/internal/rpc"
@@ -122,12 +126,20 @@ func (ing *Ingester) Run(ctx context.Context) error {
 	}
 }
 
+// ingesterTracer returns the OTel tracer for the ingester package.
+// Using a function ensures we always pick up the current global provider
+// (which may be swapped in tests).
+func ingesterTracer() trace.Tracer { return otel.Tracer("sorotrail/ingester") }
+
 // runOnce advances ingestion by one step and reports whether we are caught
 // up with the chain. With at most one request's worth of filters it ingests
 // a single page (resumable via the persisted cursor); with more watched
 // contracts than one request allows it sweeps a bounded ledger window once
 // per filter batch.
 func (ing *Ingester) runOnce(ctx context.Context) (caughtUp bool, err error) {
+	ctx, span := ingesterTracer().Start(ctx, "ingester.run_once")
+	defer span.End()
+
 	startLedger, cursor, err := ing.resolvePosition(ctx)
 	if err != nil {
 		return false, err
@@ -137,9 +149,12 @@ func (ing *Ingester) runOnce(ctx context.Context) (caughtUp bool, err error) {
 		return false, err
 	}
 	if len(batches) == 1 {
-		return ing.singlePage(ctx, startLedger, cursor, batches[0])
+		caughtUp, err = ing.singlePage(ctx, startLedger, cursor, batches[0])
+	} else {
+		caughtUp, err = ing.windowSweep(ctx, startLedger, batches)
 	}
-	return ing.windowSweep(ctx, startLedger, batches)
+	span.SetAttributes(attribute.Bool("ingester.caught_up", caughtUp))
+	return caughtUp, err
 }
 
 // singlePage issues one getEvents call and persists the page plus the resume

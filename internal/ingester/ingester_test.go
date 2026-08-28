@@ -13,6 +13,7 @@ import (
 
 	"github.com/khaylebfortune/sorotrail/internal/rpc"
 	"github.com/khaylebfortune/sorotrail/internal/store"
+	"github.com/khaylebfortune/sorotrail/internal/tracing/tracingtest"
 )
 
 func testLogger() *slog.Logger {
@@ -324,4 +325,25 @@ func TestRun_StopsOnContextCancel(t *testing.T) {
 	cancel()
 	err := ing.Run(ctx)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestRunOnce_SpanCreated(t *testing.T) {
+	exp := tracingtest.Setup(t)
+
+	client := &mockRPC{
+		health: rpc.Health{Status: "healthy", LatestLedger: 100_000, OldestLedger: 50},
+		eventsResps: []rpc.GetEventsResponse{{
+			Events:       []rpc.Event{rpcEvent("e1", 90_000)},
+			LatestLedger: 100_000,
+		}},
+	}
+	ing := newTestIngester(client, newMockStore(), Options{RetentionLedgers: 17_280, PageLimit: 100})
+
+	_, err := ing.runOnce(context.Background())
+	require.NoError(t, err)
+
+	spans := exp.GetSpans()
+	require.Len(t, spans, 1)
+	assert.Equal(t, "ingester.run_once", spans[0].Name)
+	assert.True(t, spans[0].EndTime.After(spans[0].StartTime))
 }

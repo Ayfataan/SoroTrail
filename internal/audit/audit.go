@@ -26,6 +26,10 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/khaylebfortune/sorotrail/internal/ingester"
 	"github.com/khaylebfortune/sorotrail/internal/rpc"
 	"github.com/khaylebfortune/sorotrail/internal/store"
@@ -168,9 +172,16 @@ func (a *Auditor) Run(ctx context.Context) error {
 	}
 }
 
+// auditTracer returns the OTel tracer for the audit package.
+// Using a function ensures we always pick up the current global provider.
+func auditTracer() trace.Tracer { return otel.Tracer("sorotrail/audit") }
+
 // PassOnce runs one audit pass and returns. It is exposed so tests can
 // drive the auditor deterministically without sleeping.
 func (a *Auditor) PassOnce(ctx context.Context) (worked bool, err error) {
+	ctx, span := auditTracer().Start(ctx, "audit.pass")
+	defer span.End()
+
 	// 1. Pull state.
 	state, err := a.store.GetAuditState(ctx)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -235,6 +246,11 @@ func (a *Auditor) PassOnce(ctx context.Context) (worked bool, err error) {
 		"ingested_through", ing.LastIngestedLedger,
 		"verified_through", state.VerifiedThroughLedger,
 	)
+	span.SetAttributes(
+		attribute.Int("audit.from_ledger", int(from)),
+		attribute.Int("audit.to_ledger", int(to)),
+		attribute.Int64("audit.verified_through", state.VerifiedThroughLedger),
+	)
 	return a.reconcileRange(ctx, from, to)
 }
 
@@ -243,6 +259,9 @@ func (a *Auditor) PassOnce(ctx context.Context) (worked bool, err error) {
 // high-water mark past clean prefixes, records a finding for the first
 // mismatch cluster, and attempts repair.
 func (a *Auditor) reconcileRange(ctx context.Context, from, to uint32) (bool, error) {
+	_, span := auditTracer().Start(ctx, "audit.reconcile_range")
+	defer span.End()
+
 	rpcEvents, err := a.fetchRange(ctx, from, to)
 	if err != nil {
 		return false, fmt.Errorf("fetching RPC events [%d,%d]: %w", from, to, err)
@@ -430,76 +449,88 @@ func (a *Auditor) storedIDs(ctx context.Context, ledger uint32) ([]string, error
 // visible until manually cleared.
 func (a *Auditor) repairFinding(ctx context.Context, f *store.AuditFinding) {
 	for {
-		f.Attempts++
-		f.LastAttemptedAt = time.Now()
-		_, err := a.reingest.ReingestRange(ctx, a.client, uint32(f.FromLedger), uint32(f.ToLedger))
-		if err == nil {
-			// Re-verify the cluster: a fresh census tells us whether
-			// repair actually fixed it.
-			clean, verr := a.clusterIsClean(ctx, uint32(f.FromLedger), uint32(f.ToLedger))
-			if verr != nil {
-				f.LastError = verr.Error()
-			}
-			if verr != nil {
-				// Transient: try again until the cap.
-			} else if clean {
-				f.Status = store.FindingRepaired
-				f.LastError = ""
-				a.metrics.FindingsRepaired++
-				a.log.Info("audit finding repaired",
-					"finding_id", f.ID, "from", f.FromLedger, "to", f.ToLedger,
-					"attempts", f.Attempts)
-				if uerr := a.store.UpdateAuditFinding(ctx, *f); uerr != nil {
-					a.log.Error("updating finding", "finding_id", f.ID, "error", uerr)
-				}
-				// The cluster is clean — advance HWM past it so we don't
-				// redo this verified prefix on the next pass.
-				if uerr := a.advanceHWM(ctx, uint32(f.ToLedger)); uerr != nil {
-					a.log.Error("advancing HWM after repair", "finding_id", f.ID, "error", uerr)
-				}
-				return
-			} else {
-				f.LastError = "RPC disagreeing with itself across fetches"
-			}
-		} else {
-			if rpc.IsLedgerOutOfRange(err) {
-				// RPC retention no longer covers this range: leave a
-				// permanent marker.
-				f.Status = store.FindingUnverifiable
-				f.LastError = err.Error()
-				a.metrics.FindingsUnverifiable++
-				a.log.Warn("audit finding unverifiable (range aged out of RPC retention)",
-					"finding_id", f.ID, "from", f.FromLedger, "to", f.ToLedger)
-				if uerr := a.store.UpdateAuditFinding(ctx, *f); uerr != nil {
-					a.log.Error("updating finding", "finding_id", f.ID, "error", uerr)
-				}
-				return
-			}
-			f.LastError = err.Error()
+		repairCtx, span := auditTracer().Start(ctx, "audit.repair")
+		a.doRepairAttempt(repairCtx, f)
+		span.End()
+		if f.Status == store.FindingRepaired ||
+			f.Status == store.FindingUnrecoverable ||
+			f.Status == store.FindingUnverifiable {
+			return
 		}
+	}
+}
 
-		if f.Attempts >= a.opts.MaxRepairAttempts {
-			f.Status = store.FindingUnrecoverable
-			a.metrics.FindingsUnrecoverable++
-			a.log.Error("audit finding unrecoverable after max attempts",
+// doRepairAttempt performs a single repair iteration, updating f's
+// status, attempts, and errors. The outer loop controls retry and span
+// lifecycle.
+func (a *Auditor) doRepairAttempt(ctx context.Context, f *store.AuditFinding) {
+	f.Attempts++
+	f.LastAttemptedAt = time.Now()
+	_, err := a.reingest.ReingestRange(ctx, a.client, uint32(f.FromLedger), uint32(f.ToLedger))
+	if err == nil {
+		// Re-verify the cluster: a fresh census tells us whether
+		// repair actually fixed it.
+		clean, verr := a.clusterIsClean(ctx, uint32(f.FromLedger), uint32(f.ToLedger))
+		if verr != nil {
+			f.LastError = verr.Error()
+		}
+		if verr != nil {
+			// Transient: try again until the cap.
+		} else if clean {
+			f.Status = store.FindingRepaired
+			f.LastError = ""
+			a.metrics.FindingsRepaired++
+			a.log.Info("audit finding repaired",
 				"finding_id", f.ID, "from", f.FromLedger, "to", f.ToLedger,
-				"attempts", f.Attempts, "last_error", f.LastError)
+				"attempts", f.Attempts)
+			if uerr := a.store.UpdateAuditFinding(ctx, *f); uerr != nil {
+				a.log.Error("updating finding", "finding_id", f.ID, "error", uerr)
+			}
+			// The cluster is clean — advance HWM past it so we don't
+			// redo this verified prefix on the next pass.
+			if uerr := a.advanceHWM(ctx, uint32(f.ToLedger)); uerr != nil {
+				a.log.Error("advancing HWM after repair", "finding_id", f.ID, "error", uerr)
+			}
+			return
+		} else {
+			f.LastError = "RPC disagreeing with itself across fetches"
+		}
+	} else {
+		if rpc.IsLedgerOutOfRange(err) {
+			// RPC retention no longer covers this range: leave a
+			// permanent marker.
+			f.Status = store.FindingUnverifiable
+			f.LastError = err.Error()
+			a.metrics.FindingsUnverifiable++
+			a.log.Warn("audit finding unverifiable (range aged out of RPC retention)",
+				"finding_id", f.ID, "from", f.FromLedger, "to", f.ToLedger)
 			if uerr := a.store.UpdateAuditFinding(ctx, *f); uerr != nil {
 				a.log.Error("updating finding", "finding_id", f.ID, "error", uerr)
 			}
 			return
 		}
+		f.LastError = err.Error()
+	}
 
-		// Persist intermediate state and back off briefly before the next
-		// attempt. A short constant keeps the loop bounded in tests without
-		// making the production repair path aggressive.
+	if f.Attempts >= a.opts.MaxRepairAttempts {
+		f.Status = store.FindingUnrecoverable
+		a.metrics.FindingsUnrecoverable++
+		a.log.Error("audit finding unrecoverable after max attempts",
+			"finding_id", f.ID, "from", f.FromLedger, "to", f.ToLedger,
+			"attempts", f.Attempts, "last_error", f.LastError)
 		if uerr := a.store.UpdateAuditFinding(ctx, *f); uerr != nil {
 			a.log.Error("updating finding", "finding_id", f.ID, "error", uerr)
 		}
-		if !sleepCtx(ctx, 100*time.Millisecond) {
-			return
-		}
+		return
 	}
+
+	// Persist intermediate state and back off briefly before the next
+	// attempt. A short constant keeps the loop bounded in tests without
+	// making the production repair path aggressive.
+	if uerr := a.store.UpdateAuditFinding(ctx, *f); uerr != nil {
+		a.log.Error("updating finding", "finding_id", f.ID, "error", uerr)
+	}
+	sleepCtx(ctx, 100*time.Millisecond)
 }
 
 // clusterIsClean re-fetches RPC events and the store census for the
