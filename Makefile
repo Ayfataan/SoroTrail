@@ -11,7 +11,7 @@ BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown
 
 LDFLAGS := -ldflags="-X github.com/sorotrail/sorotrail/internal/buildinfo.Version=$(VERSION) -X github.com/sorotrail/sorotrail/internal/buildinfo.Commit=$(COMMIT) -X github.com/sorotrail/sorotrail/internal/buildinfo.BuildDate=$(BUILD_DATE)"
 
-.PHONY: build build-all build-all-integration run test test-fast test-db test-integration vet vet-integration test-ci lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec ci
+.PHONY: build build-all build-all-integration run test test-fast test-db test-integration vet vet-integration test-ci lint cover cover-html migrate-up migrate-down docker-up docker-down simtest simtest-long clean bench bench-ci seed spec client ci
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/sorotrail
@@ -136,6 +136,12 @@ ci:
 # after editing it, or pkg/docs.TestSpecCopiesAreIdentical fails the build.
 spec:
 	go run ./cmd/specgen
+
+# Regenerate the versioned API client in pkg/client from api/openapi.yaml.
+# Run this after changing the spec, or pkg/client's drift test fails the
+# build (see pkg/client/README.md).
+client:
+	go run ./cmd/clientgen
 
 cover:
 	go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
