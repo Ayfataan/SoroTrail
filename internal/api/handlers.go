@@ -377,6 +377,11 @@ func eventToMap(ev store.Event, fields map[string]bool) map[string]any {
 
 }
 
+// handleHealth is the liveness probe. It reports whether the process
+// is alive and able to serve HTTP requests. It intentionally does NOT
+// check external dependencies (database, RPC) so a dependency outage
+// cannot trigger a restart loop — that is the readiness probe's job
+// (see handleReadyz).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
