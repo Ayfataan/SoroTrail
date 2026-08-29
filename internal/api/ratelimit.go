@@ -373,12 +373,6 @@ func (l *RateLimiter) checkQuota(entry *bucketEntry) (remaining int64, retryAfte
 	return remaining, 0, true
 }
 
-// bucketFor returns the per-key limiter, creating one on first sight and
-// refreshing lastSeen so cleanup is debounced.
-func (l *RateLimiter) bucketFor(key string, rps float64, burst int) *rate.Limiter {
-	return l.bucketEntryFor(key, rps, burst).limiter
-}
-
 func (l *RateLimiter) bucketEntryFor(key string, rps float64, burst int) *bucketEntry {
 	now := time.Now().UnixNano()
 	l.mu.Lock()
@@ -472,5 +466,3 @@ func ceilSeconds(d time.Duration) time.Duration {
 	}
 	return secs * time.Second
 }
-
-
