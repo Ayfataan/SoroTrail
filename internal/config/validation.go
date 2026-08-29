@@ -129,6 +129,12 @@ func (c Config) ValidateAll() error {
 	if c.RateLimitBurst < 0 {
 		errs = append(errs, fmt.Sprintf("RATE_LIMIT_BURST: %d must be non-negative", c.RateLimitBurst))
 	}
+	if c.HourlyQuota < 0 {
+		errs = append(errs, fmt.Sprintf("HOURLY_QUOTA: %d must be non-negative", c.HourlyQuota))
+	}
+	if c.DailyQuota < 0 {
+		errs = append(errs, fmt.Sprintf("DAILY_QUOTA: %d must be non-negative", c.DailyQuota))
+	}
 
 	// --- allowed values -----------------------------------------------------
 

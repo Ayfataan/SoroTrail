@@ -168,6 +168,8 @@ type Config struct {
 	RateLimitRPS          float64 `env:"RATE_LIMIT_RPS"`
 	RateLimitBurst        int     `env:"RATE_LIMIT_BURST"`
 	RateLimitTrustedProxy bool    `env:"RATE_LIMIT_TRUSTED_PROXY" envDefault:"false"`
+	HourlyQuota           int64   `env:"HOURLY_QUOTA"`
+	DailyQuota            int64   `env:"DAILY_QUOTA"`
 
 	// CompressMinSize is the response body size, in bytes, at or above which
 	// responses are gzip/deflate encoded for clients that advertise support.
@@ -313,7 +315,7 @@ type Config struct {
 	// response headers. X-Request-ID is set on every response by the API's
 	// request logger (#29), so it is the default; an operator can extend
 	// the list or empty it to suppress the header entirely.
-	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID"`
+	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID,X-RateLimit-Remaining"`
 }
 
 // Load reads configuration from the environment and validates it.
