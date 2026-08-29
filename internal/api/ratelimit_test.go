@@ -124,6 +124,32 @@ func TestRateLimit_OverLimitReturns429(t *testing.T) {
 	assert.LessOrEqual(t, secs, 5, "0.5 RPS gives ~2s, allow generous slack")
 }
 
+func TestRateLimit_HeadersReflectLimiterState(t *testing.T) {
+	lim := NewRateLimiter(0.5, 2, false)
+	stop := startLimiter(t, lim)
+	t.Cleanup(stop)
+
+	s := newTestServer(&stubStore{}, nil)
+	s.SetRateLimiter(lim)
+
+	for i := 0; i < 2; i++ {
+		resp := drive(t, s, mkReq(http.MethodGet, "/events"))
+		require.Equal(t, http.StatusOK, resp.StatusCode, "first two requests should be admitted")
+		assert.Equal(t, "2", resp.Header.Get("X-RateLimit-Limit"), "burst is the active request cap")
+		assert.NotEmpty(t, resp.Header.Get("X-RateLimit-Reset"), "reset should be present for an active bucket")
+		assert.NotEmpty(t, resp.Header.Get("X-RateLimit-Remaining"), "remaining should be reported on allowed responses")
+		resp.Body.Close()
+	}
+
+	resp := drive(t, s, mkReq(http.MethodGet, "/events"))
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	assert.Equal(t, "2", resp.Header.Get("X-RateLimit-Limit"), "limit should reflect the configured burst")
+	assert.Equal(t, "0", resp.Header.Get("X-RateLimit-Remaining"), "throttled requests must report zero remaining")
+	assert.NotEmpty(t, resp.Header.Get("X-RateLimit-Reset"), "reset should be present even when the request is rejected")
+	assert.NotEmpty(t, resp.Header.Get("Retry-After"), "throttled responses must include a retry hint")
+}
+
 func TestRateLimit_HealthIsExempt(t *testing.T) {
 	// Tight limit so /events trips after one call; /health must keep passing.
 	lim := NewRateLimiter(0.001, 1, false)
