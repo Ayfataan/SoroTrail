@@ -45,6 +45,22 @@ var envKeys = []string{
 	"CORS_EXPOSED_HEADERS", "GRAPHQL_PLAYGROUND",
 }
 
+func TestLoad_FileBackedSecrets(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/database_url.txt"
+	require.NoError(t, os.WriteFile(dbPath, []byte("postgres://user:pass@localhost/db\n"), 0o600))
+	rpcPath := dir + "/rpc_url.txt"
+	require.NoError(t, os.WriteFile(rpcPath, []byte("https://user:pass@rpc.example.com\n"), 0o600))
+
+	t.Setenv("DATABASE_URL_FILE", dbPath)
+	t.Setenv("RPC_URL_FILE", rpcPath)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://user:pass@localhost/db", cfg.DatabaseURL)
+	assert.Equal(t, "https://user:pass@rpc.example.com", cfg.RPCURL)
+}
+
 func TestLoad(t *testing.T) {
 	tests := []struct {
 		name    string
