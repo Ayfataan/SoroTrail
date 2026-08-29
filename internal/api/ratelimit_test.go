@@ -359,6 +359,29 @@ func TestQuota_HourlyExceededReturns429AndRemainingZero(t *testing.T) {
 	assert.NotEmpty(t, resp2.Header.Get("Retry-After"))
 }
 
+func TestQuota_RollingWindowsUseElapsedTime(t *testing.T) {
+	lim := NewRateLimiter(100, 100, false,
+		WithHourlyQuota(1),
+		WithDailyQuota(1),
+	)
+
+	entry := &bucketEntry{
+		hourStart: time.Now().Add(-2 * time.Hour),
+		hourUsed:  1,
+		dayStart:  time.Now().Add(-25 * time.Hour),
+		dayUsed:   1,
+	}
+
+	remaining, retryAfter, ok := lim.checkQuota(entry)
+	require.True(t, ok)
+	assert.Equal(t, int64(0), remaining, "quota should reset after the full rolling window elapsed")
+	assert.Zero(t, retryAfter)
+	assert.EqualValues(t, 1, entry.hourUsed)
+	assert.EqualValues(t, 1, entry.dayUsed)
+	assert.True(t, entry.hourStart.After(time.Now().Add(-time.Hour)))
+	assert.True(t, entry.dayStart.After(time.Now().Add(-24*time.Hour)))
+}
+
 func TestQuota_PerAPIKeyIsIndependentOfIP(t *testing.T) {
 	lim := NewRateLimiter(100, 100, false,
 		WithHourlyQuota(1),

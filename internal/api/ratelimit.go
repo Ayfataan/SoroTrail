@@ -330,21 +330,29 @@ func (l *RateLimiter) quotaEnabled() bool {
 func (l *RateLimiter) checkQuota(entry *bucketEntry) (remaining int64, retryAfter time.Duration, ok bool) {
 	now := time.Now()
 	if l.hourlyQuota > 0 {
-		if entry.hourStart.IsZero() || !sameHour(entry.hourStart, now) {
-			entry.hourStart = truncateToHour(now)
+		if entry.hourStart.IsZero() || now.Sub(entry.hourStart) >= time.Hour {
+			entry.hourStart = now
 			entry.hourUsed = 0
 		}
 		if entry.hourUsed >= l.hourlyQuota {
-			return 0, time.Until(truncateToHour(now).Add(time.Hour)), false
+			retryAfter = entry.hourStart.Add(time.Hour).Sub(now)
+			if retryAfter < 0 {
+				retryAfter = 0
+			}
+			return 0, retryAfter, false
 		}
 	}
 	if l.dailyQuota > 0 {
-		if entry.dayStart.IsZero() || !sameDay(entry.dayStart, now) {
-			entry.dayStart = truncateToDay(now)
+		if entry.dayStart.IsZero() || now.Sub(entry.dayStart) >= 24*time.Hour {
+			entry.dayStart = now
 			entry.dayUsed = 0
 		}
 		if entry.dayUsed >= l.dailyQuota {
-			return 0, time.Until(truncateToDay(now).Add(24*time.Hour)), false
+			retryAfter = entry.dayStart.Add(24 * time.Hour).Sub(now)
+			if retryAfter < 0 {
+				retryAfter = 0
+			}
+			return 0, retryAfter, false
 		}
 	}
 	entry.hourUsed++
@@ -465,18 +473,4 @@ func ceilSeconds(d time.Duration) time.Duration {
 	return secs * time.Second
 }
 
-func truncateToHour(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, t.Location())
-}
 
-func truncateToDay(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-}
-
-func sameHour(a, b time.Time) bool {
-	return a.Year() == b.Year() && a.Month() == b.Month() && a.Day() == b.Day() && a.Hour() == b.Hour()
-}
-
-func sameDay(a, b time.Time) bool {
-	return a.Year() == b.Year() && a.Month() == b.Month() && a.Day() == b.Day()
-}
