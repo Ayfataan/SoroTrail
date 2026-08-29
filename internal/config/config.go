@@ -321,6 +321,9 @@ type Config struct {
 // Load reads configuration from the environment and validates it.
 // All validation failures are aggregated into a single error.
 func Load() (Config, error) {
+	if err := resolveFileEnv(); err != nil {
+		return Config{}, fmt.Errorf("resolving *_FILE environment values: %w", err)
+	}
 	var cfg Config
 	if err := env.Parse(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing environment: %w", err)
@@ -351,6 +354,31 @@ func Load() (Config, error) {
 }
 
 // IsSQLite reports whether the database URL points to a SQLite database.
+func resolveFileEnv() error {
+	for _, kv := range os.Environ() {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name, filePath := parts[0], parts[1]
+		if !strings.HasSuffix(name, "_FILE") {
+			continue
+		}
+		baseName := strings.TrimSuffix(name, "_FILE")
+		if _, set := os.LookupEnv(baseName); set {
+			continue
+		}
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("%s: reading %q: %w", name, filePath, err)
+		}
+		if err := os.Setenv(baseName, strings.TrimRight(string(data), "\r\n")); err != nil {
+			return fmt.Errorf("%s: setting %s: %w", name, baseName, err)
+		}
+	}
+	return nil
+}
+
 func IsSQLite(databaseURL string) bool {
 	return strings.HasPrefix(databaseURL, "sqlite:")
 }
