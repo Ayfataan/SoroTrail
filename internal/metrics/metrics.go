@@ -36,12 +36,62 @@ var (
 	})
 
 	// RPCCallLatency records the wall-clock duration of a single
-	// JSON-RPC call (HTTP round trip + body read + unmarshal).
-	RPCCallLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
+	// JSON-RPC call (HTTP round trip + body read + unmarshal), labelled
+	// by method (a fixed enum: getEvents, getLatestLedger, getHealth,
+	// getLedgerEntries, simulateTransaction) and outcome (success |
+	// error). The histogram's _count for a (method, outcome) pair is the
+	// call total, so this single metric answers both "how slow" and
+	// "how many, and how many failed".
+	RPCCallLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "sorotrail_rpc_call_duration_seconds",
-		Help:    "RPC call latency in seconds (HTTP round trip + body read + parse).",
+		Help:    "RPC call latency in seconds (HTTP round trip + body read + parse), labelled by method and outcome.",
 		Buckets: prometheus.DefBuckets,
-	})
+	}, []string{"method", "outcome"})
+
+	// RPCRetriesTotal counts every retry attempt issued by RetryClient
+	// (attempts after the first). reason is where the wait came from:
+	// "backoff" for the computed exponential schedule, "retry_after"
+	// for a provider-supplied 429 Retry-After hint.
+	RPCRetriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "sorotrail_rpc_retries_total",
+		Help: "Total number of RPC retry attempts, labelled by method and reason (backoff | retry_after).",
+	}, []string{"method", "reason"})
+
+	// RPCBackoffSeconds is the cumulative wall-clock time spent sleeping
+	// between retries. A long tail here means the provider (or our own
+	// rate limiter) is throttling us, which is cheap to spot next to the
+	// retry count.
+	RPCBackoffSeconds = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "sorotrail_rpc_backoff_seconds_total",
+		Help: "Total seconds spent sleeping between RPC retries, labelled by method.",
+	}, []string{"method"})
+
+	// RPCFailoversTotal counts failover events in the multi-provider
+	// client: "switch" when traffic moved to a different provider,
+	// "reanchor" when a cursor request hit ErrFailoverReanchor and the
+	// caller had to discard its cursor.
+	RPCFailoversTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "sorotrail_rpc_failovers_total",
+		Help: "Total number of RPC provider failover events, labelled by reason (switch | reanchor).",
+	}, []string{"reason"})
+
+	// RPCCircuitBreakerState exposes the circuit breaker's current state
+	// as a 0/1 gauge per state (closed | open | half-open), so a stuck
+	// breaker is visible at a glance and PromQL can alert on
+	// sorotrail_rpc_circuit_breaker_state{state="open"} == 1.
+	RPCCircuitBreakerState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "sorotrail_rpc_circuit_breaker_state",
+		Help: "Circuit breaker state as a 0/1 gauge per state (closed | open | half-open).",
+	}, []string{"state"})
+
+	// RPCProviderState exposes each failover provider's health state as
+	// a 0/1 gauge per (provider, state) pair (active | degraded | down).
+	// The provider label is the URL's hostname only — credentials and
+	// scheme are never exposed (see rpc.providerLabel).
+	RPCProviderState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "sorotrail_rpc_provider_state",
+		Help: "Per-provider failover health state as a 0/1 gauge per state (active | degraded | down).",
+	}, []string{"provider", "state"})
 
 	// DBWriteLatency records the wall-clock duration of a database write
 	// operation (batch upsert, replace-in-range, etc.).
@@ -67,6 +117,51 @@ var (
 		Name: "sorotrail_ingestion_lag_ledgers",
 		Help: "Number of ledgers the indexer is behind the chain head.",
 	})
+
+	// ---- Batch / backpressure instrumentation ----
+	// The batch controller that splits a fetch page into many UpsertEvents
+	// calls (see ingester.batchController) exposes its heartbeat here so
+	// operators can tell at a glance whether ingestion is shaving its
+	// batches down or throttling to protect the database at peak.
+
+	// EventBatchWrites counts every UpsertEvents call issued by the
+	// ingester with at least one row. When batching is disabled this is
+	// exactly one per non-empty page; with batching enabled it reflects
+	// how many chunks the adaptive controller split a page into.
+	EventBatchWrites = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "sorotrail_event_batch_writes_total",
+		Help: "Total number of event store writes (UpsertEvents calls) issued by the ingester.",
+	})
+
+	// EventBatchSize is the current batch size the controller feeds the
+	// store per write. It stays at the configured maximum while writes are
+	// comfortably inside the latency budget and steps down under latency
+	// pressure, so a falling gauge is the earliest signal the store is
+	// starting to strain.
+	EventBatchSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "sorotrail_event_batch_size",
+		Help: "Current adaptive event batch size used for each store write.",
+	})
+
+	// EventBackpressure counts how many times the ingester inserted a
+	// deliberate sleep between writes because the store fell behind the
+	// latency budget. A non-zero value proves backpressure is firing;
+	// paired with EventBackpressureSeconds it explains how much time was
+	// spent between the initial surge and the DB catching up.
+	EventBackpressure = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "sorotrail_event_backpressure_total",
+		Help: "Total number of throttle sleeps inserted between event batch writes.",
+	})
+
+	// EventBackpressureSeconds is the cumulative wall-clock time spent
+	// sleeping under backpressure. The monetary impact of a surge is
+	// best priced in seconds: a long tail here means the DB was slow
+	// for a sustained stretch, not just a burst.
+	EventBackpressureSeconds = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "sorotrail_event_backpressure_seconds_total",
+		Help: "Total seconds spent throttling event writes under backpressure.",
+	})
+	// ---- End batch instrumentation ----
 )
 
 func init() {
@@ -77,6 +172,15 @@ func init() {
 		DBWriteLatency,
 		DBQueryDuration,
 		IngestionLag,
+		EventBatchWrites,
+		EventBatchSize,
+		EventBackpressure,
+		EventBackpressureSeconds,
+		RPCRetriesTotal,
+		RPCBackoffSeconds,
+		RPCFailoversTotal,
+		RPCCircuitBreakerState,
+		RPCProviderState,
 	)
 }
 

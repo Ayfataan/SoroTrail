@@ -1,5 +1,24 @@
 // Package ingester runs the polling loop that pulls contract events from
 // Stellar RPC and persists them.
+//
+// The entry point is [New], which wires an [Ingester] from an [rpc.Client],
+// a [store.Store], a [decode.Decoder], a logger, and [Options]. Call
+// [Ingester.Run] to start the loop; it blocks until the context is
+// canceled.
+//
+// Non-obvious contracts:
+//   - [Ingester.Run] never returns nil on success; the only terminal
+//     condition is context cancellation (returns ctx.Err()).
+//   - Errors are retried with jittered exponential backoff, capped at
+//     [Options.MaxBackoff].
+//   - [Ingester.BuildFilterBatches] is exported so the auditor can fetch
+//     with the exact same filter set as ingest — events outside this
+//     filter set were intentionally not stored and must not be flagged as
+//     audit discrepancies.
+//   - [Ingester.ReingestRange] does NOT advance the ingester's persisted
+//     cursor; it is for auditor repairs of specific ledger ranges.
+//   - [Ingester.PageLimit] is exported so the auditor can reuse it and
+//     never silently disagree on page size.
 package ingester
 
 import (
@@ -8,6 +27,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -70,11 +91,18 @@ type Options struct {
 	PollInterval time.Duration
 	// StartLedger, when non-zero, overrides the cold-start position.
 	StartLedger uint32
+	// StartLedgerRaw holds the raw START_LEDGER value from the
+	// environment so the ingester can parse relative offsets (e.g.
+	// "latest-1000") at runtime when the RPC client is available.
+	StartLedgerRaw string
 	// RetentionLedgers is how far behind the latest ledger a cold start
 	// reaches when StartLedger is unset. Default 17280 (~24h).
 	RetentionLedgers uint32
 	// PageLimit is the getEvents pagination limit per request. Default 1000.
 	PageLimit uint
+	// WriteBatchSize is the maximum number of events written in one store
+	// operation. Default 1000.
+	WriteBatchSize uint
 	// MaxEventsPerCycle caps the number of events a single runOnce cycle
 	// may process, bounding memory and per-cycle latency on busy chains.
 	// When the cap is hit mid-window the sweep stops issuing further
@@ -86,6 +114,36 @@ type Options struct {
 	// Zero (the default) disables the cap — behavior identical to builds
 	// before this option existed.
 	MaxEventsPerCycle uint
+	// BatchSize caps how many events a single store write (UpsertEvents
+	// call) may carry, splitting a fetched page into smaller chunks. This
+	// keeps high-volume chains from landing one giant batch on the DB at
+	// once: many small writes are kinder to Postgres than one huge one
+	// when events are dense.
+	//
+	// Zero (the default) disables splitting entirely — each page is
+	// persisted in a single write exactly as before this option existed
+	// (bit-for-bit backward compatible).
+	//
+	// When BatchSize > 0 AND BatchTargetLatency > 0 the controller becomes
+	// adaptive: it shrinks the chunk size below BatchSize and inserts
+	// backpressure sleeps whenever write latency exceeds the budget, then
+	// grows back once the store catches up. See BatchTargetLatency.
+	BatchSize uint
+	// BatchTargetLatency is the per-WRITE latency budget at the maximum
+	// batch size (BatchSize). The controller derives a per-event budget
+	// from it and compares against an EWMA of measured per-event write
+	// latency: when writes run over budget it halves the chunk size and
+	// sleeps between writes (backpressure); when they comfortably beat
+	// the budget it grows the chunk size back toward BatchSize.
+	//
+	// Zero disables the adaptive/backpressure machinery (the chunk size
+	// stays fixed at BatchSize). Only meaningful when BatchSize > 0.
+	BatchTargetLatency time.Duration
+	// BatchMaxBackoff caps the backpressure sleep the controller inserts
+	// between writes when the store is running over the latency budget,
+	// so a severely degraded database cannot stretch a single ingestion
+	// cycle for minutes. Default 1s when batching is enabled.
+	BatchMaxBackoff time.Duration
 	// MaxBackoff caps the error backoff. Default 1m.
 	MaxBackoff time.Duration
 	// SweepWindow bounds the ledger range scanned per pass when the watched
@@ -162,11 +220,21 @@ func (o *Options) applyDefaults() {
 	if o.PageLimit == 0 {
 		o.PageLimit = 1000
 	}
+	if o.WriteBatchSize == 0 {
+		o.WriteBatchSize = 1000
+	}
 	if o.MaxBackoff <= 0 {
 		o.MaxBackoff = time.Minute
 	}
 	if o.SweepWindow == 0 {
 		o.SweepWindow = 1000
+	}
+	// BatchMaxBackoff is only meaningful when batching is on; the default
+	// (1s) caps how long a single backpressure sleep can stretch a cycle
+	// when the DB is badly behind. When batching is off the field is
+	// simply never read.
+	if o.BatchMaxBackoff <= 0 {
+		o.BatchMaxBackoff = time.Second
 	}
 	if o.LagMetrics == nil {
 		o.LagMetrics = noopLagMetrics{}
@@ -229,6 +297,17 @@ type Ingester struct {
 	deadLetterStore DeadLetterSink
 }
 
+type networkStateStore interface {
+	GetIngestionStateForNetwork(context.Context, string) (store.IngestionState, error)
+}
+
+func (ing *Ingester) getIngestionState(ctx context.Context) (store.IngestionState, error) {
+	if scoped, ok := ing.store.(networkStateStore); ok {
+		return scoped.GetIngestionStateForNetwork(ctx, ing.opts.Network)
+	}
+	return ing.store.GetIngestionState(ctx)
+}
+
 // New wires an Ingester.
 func New(client rpc.Client, st store.Store, dec decode.Decoder, log *slog.Logger, opts Options) *Ingester {
 	opts.applyDefaults()
@@ -288,6 +367,9 @@ func (o *Options) logAttrs() []any {
 		"poll_interval", o.PollInterval,
 		"page_limit", o.PageLimit,
 		"max_events_per_cycle", o.MaxEventsPerCycle,
+		"batch_size", o.BatchSize,
+		"batch_target_latency", o.BatchTargetLatency,
+		"batch_max_backoff", o.BatchMaxBackoff,
 		"start_ledger", o.StartLedger,
 		"retention_ledgers", o.RetentionLedgers,
 		"sweep_window", o.SweepWindow,
@@ -395,7 +477,7 @@ func (ing *Ingester) Run(ctx context.Context) (err error) {
 // the caller. A no-op return is fine: it means there's not yet enough
 // history to have a finalized window.
 func (ing *Ingester) rescanForReorg(ctx context.Context) error {
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("loading ingestion state for reorg rescan: %w", err)
 	}
@@ -444,7 +526,7 @@ func (ing *Ingester) runOnce(ctx context.Context) (caughtUp bool, err error) {
 	if len(batches) == 1 {
 		return ing.singlePage(ctx, startLedger, cursor, batches[0])
 	}
-	return ing.windowSweepUnwatched(ctx, startLedger, batches)
+	return ing.windowSweep(ctx, startLedger, batches)
 }
 
 func (ing *Ingester) singlePage(ctx context.Context, startLedger uint32, cursor string, filters []rpc.EventFilter) (bool, error) {
@@ -476,6 +558,7 @@ func (ing *Ingester) singlePage(ctx context.Context, startLedger uint32, cursor 
 	if state.LastCursor == "" && state.LastIngestedLedger <= 0 {
 		state.LastIngestedLedger = int64(startLedger) - 1
 	}
+	state.Network = ing.opts.Network
 	if err := ing.store.SaveIngestionState(ctx, state); err != nil {
 		return false, err
 	}
@@ -557,6 +640,7 @@ func (ing *Ingester) reingestBatch(ctx context.Context, client rpc.Client, fromL
 		if err != nil {
 			return 0, err
 		}
+		ev.Network = ing.opts.Network
 		storeEvents = append(storeEvents, ev)
 	}
 	if err := ing.store.ReplaceEventsInRange(ctx, storeEvents, int64(fromLedger), int64(toLedger)); err != nil {
@@ -573,6 +657,10 @@ func (ing *Ingester) BuildFilterBatches(ctx context.Context) ([][]rpc.EventFilte
 
 // PageLimit returns the getEvents pagination cap.
 func (ing *Ingester) PageLimit() uint { return ing.opts.PageLimit }
+
+// WriteBatchSize returns the maximum number of events written in one store
+// operation.
+func (ing *Ingester) WriteBatchSize() uint { return ing.opts.WriteBatchSize }
 
 // MaxEventsPerCycle returns the per-cycle event cap; 0 means disabled.
 func (ing *Ingester) MaxEventsPerCycle() uint { return ing.opts.MaxEventsPerCycle }
@@ -672,6 +760,14 @@ func (ing *Ingester) windowSweep(ctx context.Context, start uint32, batches [][]
 	// of which error races out first.
 	var ledgerOutOfRange atomic.Bool
 	g, gctx := errgroup.WithContext(ctx)
+	// SweepConcurrency also doubles as the DB backpressure knob: each
+	// sweepBatch goroutine calls persistEvents (a synchronous UpsertEvents)
+	// before fetching its next page, so this same SetLimit caps how many
+	// UpsertEvents calls can be in flight at once — a goroutine can't start
+	// a new RPC fetch (and so can't queue a new write) until its slot frees
+	// up, which requires its current write to finish. No separate DB
+	// semaphore is needed; a slow store just makes each goroutine's cycle
+	// take longer, which throttles the RPC fetch rate to match.
 	g.SetLimit(ing.opts.SweepConcurrency)
 	for _, filters := range batches {
 		filters := filters
@@ -700,18 +796,12 @@ func (ing *Ingester) windowSweep(ctx context.Context, start uint32, batches [][]
 		lastIngested = int64(end) - 1
 	}
 	now := time.Now().UTC()
-	err = ing.store.SaveIngestionState(ctx, store.IngestionState{LastIngestedLedger: lastIngested, LastSuccessfulPoll: &now})
+	err = ing.store.SaveIngestionState(ctx, store.IngestionState{Network: ing.opts.Network, LastIngestedLedger: lastIngested, LastSuccessfulPoll: &now})
 	if err != nil {
 		return false, err
 	}
 	ing.setIngestionLag(int64(health.LatestLedger), lastIngested)
 	return end >= health.LatestLedger, nil
-}
-
-// windowSweepUnwatched delegates to the existing windowSweep that uses the
-// single global ingestion_state row — backward-compatible behavior unchanged.
-func (ing *Ingester) windowSweepUnwatched(ctx context.Context, start uint32, batches [][]rpc.EventFilter) (bool, error) {
-	return ing.windowSweep(ctx, start, batches)
 }
 
 // sweepBatch pages one filter batch through [start, end]. Errors are
@@ -844,45 +934,217 @@ func (ing *Ingester) persistEvents(ctx context.Context, rpcEvents []rpc.Event, l
 		}
 		events = append(events, ev)
 	}
+	for start := 0; start < len(events); start += int(ing.opts.WriteBatchSize) {
+		end := min(start+int(ing.opts.WriteBatchSize), len(events))
+		if err := ing.persistEventBatch(ctx, events[start:end], rpcEvents[len(rpcEvents)-1].Ledger, latestLedger); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ing *Ingester) persistEventBatch(ctx context.Context, events []store.Event, throughLedger, latestLedger uint32) error {
 	persistCtx, persistSpan := ing.tracer.Start(ctx, "ingester.persist_events")
-	timer := prometheus.NewTimer(metrics.DBWriteLatency)
-	inserted, err := ing.store.UpsertEvents(persistCtx, events)
-	timer.ObserveDuration()
+	inserted, err := ing.writeEventsPersist(persistCtx, events)
 	persistSpan.End()
 	if err != nil {
 		return err
 	}
-	metrics.EventsIngested.Add(float64(len(events)))
 
-	// Extract addresses from decoded event topics/values and persist the
-	// inverted index. Extraction operates on the decoded JSON (not XDR) and
-	// runs after UpsertEvents so a failed address extraction does not lose
-	// events — the events themselves are already committed.
 	if err := ing.indexEventAddresses(ctx, events); err != nil {
-		// Log the error but do not fail the ingest pass: address indexing
-		// is a derived index and can be rebuilt via the index-addresses
-		// backfill command if it falls behind.
 		ing.log.Error("indexing event addresses", "error", err)
 	}
 
 	ing.log.Info("ingested events",
 		"count", len(events), "new", inserted,
-		"through_ledger", rpcEvents[len(rpcEvents)-1].Ledger,
+		"through_ledger", throughLedger,
 		"latest_ledger", latestLedger)
 
 	if ing.bcast != nil {
 		ing.bcast.Publish(ctx, events)
 	}
-	// Notify webhooks (or other listeners) after successful persistence.
-	// This is a fire-and-forget call — it must never block ingestion.
 	if ing.notifier != nil {
 		ing.notifier.NotifyEvents(ctx, events)
 	}
 	return nil
 }
 
+// writeEventsPersist flushes decoded events to the store. With batching
+// disabled (BatchSize == 0) it issues a single UpsertEvents for the whole
+// slice — the exact behavior the ingester has always had. With batching
+// enabled it walks the slice in chunks of up to the current adaptive batch
+// size, and under latency pressure shrinks the chunk size and sleeps
+// between chunks to give the DB room to drain.
+//
+// It returns the number of rows reported inserted (net-new) across all
+// writes; the caller handles the post-persist work (address indexing,
+// broadcast, notify, logging) that runs once regardless of how many writes
+// a page split into.
+func (ing *Ingester) writeEventsPersist(ctx context.Context, events []store.Event) (int64, error) {
+	if len(events) == 0 {
+		return 0, nil
+	}
+
+	// Batching disabled: single write of the whole page, exactly as the
+	// ingester has always done.
+	if ing.opts.BatchSize == 0 {
+		timer := prometheus.NewTimer(metrics.DBWriteLatency)
+		inserted, err := ing.store.UpsertEvents(ctx, events)
+		timer.ObserveDuration()
+		if err != nil {
+			return 0, err
+		}
+		metrics.EventsIngested.Add(float64(len(events)))
+		metrics.EventBatchWrites.Inc()
+		metrics.EventBatchSize.Set(float64(len(events)))
+		return inserted, nil
+	}
+
+	bc := ing.newBatchController()
+	metrics.EventBatchSize.Set(float64(bc.cur))
+	var inserted int64
+	for start := 0; start < len(events); {
+		// Chunk no larger than the controller's current (possibly
+		// shrunken) batch size.
+		n := bc.cur
+		end := start + n
+		if end > len(events) {
+			end = len(events)
+		}
+		chunk := events[start:end]
+		start = end
+
+		begin := ing.opts.Clock.Now()
+		timer := prometheus.NewTimer(metrics.DBWriteLatency)
+		got, err := ing.store.UpsertEvents(ctx, chunk)
+		timer.ObserveDuration()
+		latency := ing.opts.Clock.Now().Sub(begin)
+		if err != nil {
+			// A failed write aborts the page: the offending batch was not
+			// committed, and the caller surfaces the error so runOnce
+			// retries the whole page idempotently. Events already written
+			// by earlier chunks are safe (idempotent upserts cover them).
+			return inserted, err
+		}
+		inserted += got
+		metrics.EventsIngested.Add(float64(len(chunk)))
+		metrics.EventBatchWrites.Inc()
+
+		// Backpressure: if this write ran over the latency budget, sleep
+		// (and shrink the next chunk) before issuing the next write, so a
+		// slow store gets a moment to drain instead of being hammered.
+		backoff := bc.recordAndBackoff(len(chunk), latency)
+		if backoff > 0 && start < len(events) {
+			if !ing.opts.Clock.SleepCtx(ctx, backoff) {
+				return inserted, ctx.Err()
+			}
+			metrics.EventBackpressure.Inc()
+			metrics.EventBackpressureSeconds.Add(backoff.Seconds())
+		}
+	}
+	return inserted, nil
+}
+
+// newBatchController builds a fresh batch controller from Options. It is
+// created per persist call (never shared between goroutines) so concurrent
+// windowSweep batches under SweepConcurrency > 1 each adapt independently
+// of one another and no mutable state is written from two goroutines at
+// once (the -race suite depends on that). Adaptation therefore carries
+// across writes WITHIN a page — exactly the burst horizon the DB pressure
+// problem lives on — not across pages.
+func (ing *Ingester) newBatchController() *batchController {
+	bc := &batchController{
+		max:   int(ing.opts.BatchSize),
+		cur:   int(ing.opts.BatchSize),
+		maxBk: ing.opts.BatchMaxBackoff,
+	}
+	if ing.opts.BatchTargetLatency > 0 {
+		bc.adaptive = true
+		bc.targetPerEvent = ing.opts.BatchTargetLatency / time.Duration(ing.opts.BatchSize)
+		if bc.targetPerEvent <= 0 {
+			// Guard against a budget so small it rounds to zero: fall back
+			// to a microsecond so a legitimate (tiny) budget never collapses
+			// the controller into permanent immediate-backoff.
+			bc.targetPerEvent = time.Microsecond
+		}
+		bc.ewma = bc.targetPerEvent
+	}
+	return bc
+}
+
+// batchController sizes the UpsertEvents chunks written for one fetched
+// page and applies backpressure. Its state lives only for the duration of
+// a single writeEventsPersist call, so it is not safe for cross-goroutine
+// use by design — see newBatchController.
+//
+// Two knobs do different jobs:
+//   - recordAndBackoff shrinks bc.cur below the configured max when the
+//     EWMA of measured per-event write latency exceeds the derived budget,
+//     so subsequent writes carry fewer rows.
+//   - It returns a sleep duration so the caller can pause between writes
+//     (backpressure), giving a slow store time to drain before the next
+//     (already smaller) chunk.
+//
+// The controller grows bc.cur back toward max once writes are comfortably
+// inside budget, so a store that recovers first reclaims its throughput.
+type batchController struct {
+	// max is the configured maximum chunk size; cur is the current
+	// adaptive one (starts at max).
+	max   int
+	cur   int
+	maxBk time.Duration
+	// adaptive is true only when BatchTargetLatency > 0; when false the
+	// controller still chunks at a fixed BatchSize but never shrinks or
+	// sleeps.
+	adaptive       bool
+	targetPerEvent time.Duration
+	ewma           time.Duration
+}
+
+// recordAndBackoff feeds one write's measured latency into the controller
+// and returns how long to sleep before the next write (0 = none). With
+// adaptation disabled it returns 0 always and the chunk size stays fixed at
+// the configured maximum.
+func (bc *batchController) recordAndBackoff(rows int, latency time.Duration) time.Duration {
+	if !bc.adaptive || rows <= 0 || bc.cur <= 0 {
+		return 0
+	}
+
+	perEvent := latency / time.Duration(rows)
+	if bc.ewma <= 0 {
+		bc.ewma = perEvent
+	} else {
+		// A fast EWMA (alpha 0.5) so the controller reacts to a burst
+		// within a handful of writes instead of smoothing it away.
+		bc.ewma = time.Duration(float64(perEvent)*0.5 + float64(bc.ewma)*0.5)
+	}
+
+	overBudget := bc.ewma > bc.targetPerEvent
+	comfortablyUnder := bc.ewma < bc.targetPerEvent/2
+
+	switch {
+	case overBudget && bc.cur > 1:
+		bc.cur /= 2
+		metrics.EventBatchSize.Set(float64(bc.cur))
+		return bc.maxBk
+	case comfortablyUnder && bc.cur < bc.max:
+		bc.cur *= 2
+		if bc.cur > bc.max {
+			bc.cur = bc.max
+		}
+		metrics.EventBatchSize.Set(float64(bc.cur))
+		return 0
+	case overBudget:
+		// Already at the minimum chunk size: cannot shrink further, but
+		// still back off before the next write.
+		return bc.maxBk
+	default:
+		return 0
+	}
+}
+
 func (ing *Ingester) resolvePosition(ctx context.Context) (startLedger uint32, cursor string, err error) {
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return 0, "", err
 	}
@@ -893,22 +1155,61 @@ func (ing *Ingester) resolvePosition(ctx context.Context) (startLedger uint32, c
 		return uint32(state.LastIngestedLedger) + 1, "", nil
 	}
 
-	if ing.opts.StartLedger > 0 {
-		return ing.opts.StartLedger, "", nil
-	}
 	health, err := ing.client.GetHealth(ctx)
 	if err != nil {
 		return 0, "", fmt.Errorf("getHealth for cold start: %w", err)
 	}
-	start := int64(health.LatestLedger) - int64(ing.opts.RetentionLedgers)
-	if oldest := int64(health.OldestLedger); start < oldest {
-		start = oldest
+
+	var resolved uint32
+	if ing.opts.StartLedger > 0 {
+		resolved = ing.opts.StartLedger
+	} else if ing.opts.StartLedgerRaw != "" {
+		resolved, err = resolveStartLedgerRaw(ing.opts.StartLedgerRaw, health)
+		if err != nil {
+			return 0, "", err
+		}
+	} else {
+		start := int64(health.LatestLedger) - int64(ing.opts.RetentionLedgers)
+		if oldest := int64(health.OldestLedger); start < oldest {
+			start = oldest
+		}
+		if start < 2 {
+			start = 2
+		}
+		resolved = uint32(start)
 	}
+
+	if (ing.opts.StartLedger > 0 || ing.opts.StartLedgerRaw != "") &&
+		health.OldestLedger > 0 && resolved < health.OldestLedger {
+		return 0, "", fmt.Errorf(
+			"START_LEDGER %d is below the RPC's oldest retained ledger %d; events in the gap are unrecoverable",
+			resolved, health.OldestLedger)
+	}
+	if resolved < 2 {
+		resolved = 2
+	}
+	ing.log.Info("cold start", "start_ledger", resolved, "latest_ledger", health.LatestLedger)
+	return resolved, "", nil
+}
+
+func resolveStartLedgerRaw(raw string, health rpc.Health) (uint32, error) {
+	raw = strings.TrimSpace(raw)
+	if n, err := strconv.ParseUint(raw, 10, 32); err == nil {
+		return uint32(n), nil
+	}
+	if !strings.HasPrefix(strings.ToLower(raw), "latest-") {
+		return 0, fmt.Errorf("START_LEDGER %q: not an absolute ledger number or relative offset", raw)
+	}
+	offsetStr := raw[len("latest-"):]
+	offset, err := strconv.ParseUint(offsetStr, 10, 32)
+	if err != nil || offset == 0 {
+		return 0, fmt.Errorf("START_LEDGER %q: offset must be a positive integer", raw)
+	}
+	start := int64(health.LatestLedger) - int64(offset)
 	if start < 2 {
 		start = 2
 	}
-	ing.log.Info("cold start", "start_ledger", start, "latest_ledger", health.LatestLedger)
-	return uint32(start), "", nil
+	return uint32(start), nil
 }
 
 func (ing *Ingester) reclampToOldest(ctx context.Context, requested uint32) error {
@@ -919,6 +1220,7 @@ func (ing *Ingester) reclampToOldest(ctx context.Context, requested uint32) erro
 	ing.log.Warn("resume ledger fell outside RPC retention window; skipping ahead — events in the gap are lost",
 		"requested_ledger", requested, "oldest_retained", health.OldestLedger)
 	return ing.store.SaveIngestionState(ctx, store.IngestionState{
+		Network:            ing.opts.Network,
 		LastIngestedLedger: int64(health.OldestLedger) - 1,
 	})
 }
@@ -932,7 +1234,7 @@ func (ing *Ingester) reclampToOldest(ctx context.Context, requested uint32) erro
 // in that path — it guards against any future change that might persist a
 // cursor mid-sweep.
 func (ing *Ingester) discardCursor(ctx context.Context) {
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil {
 		ing.log.Warn("discardCursor: could not read state", "error", err)
 		return
@@ -941,6 +1243,7 @@ func (ing *Ingester) discardCursor(ctx context.Context) {
 		return
 	}
 	if err := ing.store.SaveIngestionState(ctx, store.IngestionState{
+		Network:            ing.opts.Network,
 		LastIngestedLedger: state.LastIngestedLedger,
 	}); err != nil {
 		ing.log.Warn("discardCursor: could not save state", "error", err)
@@ -979,7 +1282,7 @@ func (ing *Ingester) checkLag(ctx context.Context) {
 		// noise without adding information.
 		return
 	}
-	state, err := ing.store.GetIngestionState(ctx)
+	state, err := ing.getIngestionState(ctx)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Cold start: no baseline yet, but still publish the

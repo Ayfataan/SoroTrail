@@ -1,7 +1,12 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +19,7 @@ const validContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
 var envKeys = []string{
 	"RPC_URL", "RPC_URLS", "RPC_RATE_LIMIT_RPS", "RPC_RATE_LIMIT", "DATABASE_URL",
 	"POLL_INTERVAL", "HTTP_ADDR",
-	"WATCHED_CONTRACTS", "START_LEDGER", "RETENTION_LEDGERS", "LOG_LEVEL", "LOG_FORMAT",
+	"WATCHED_CONTRACTS", "START_LEDGER", "RETENTION_LEDGERS", "INGEST_PAGE_SIZE", "INGEST_BATCH_SIZE", "LOG_LEVEL", "LOG_FORMAT",
 	"API_QUERY_TIMEOUT", "API_SLOW_QUERY_THRESHOLD",
 	"HORIZON_URL", "BACKFILL_RATE_RPS",
 	"AUDIT_ENABLED", "AUDIT_POLL_INTERVAL", "AUDIT_BATCH_LEDGERS",
@@ -26,6 +31,7 @@ var envKeys = []string{
 	"SHUTDOWN_TIMEOUT",
 	"INGESTION_LOCK_ENABLED",
 	"MAX_EVENTS_PER_CYCLE",
+	"BATCH_SIZE", "BATCH_TARGET_LATENCY", "BATCH_MAX_BACKOFF",
 	"MULTI_TENANT", "MULTI_TENANT_MAX_WATCHED", "MULTI_TENANT_USAGE_FLUSH",
 	"MULTI_TENANT_STREAM_SCOPE_SYNC", "MULTI_TENANT_BOOTSTRAP_KEY",
 	"RETENTION_MAX_AGE", "RETENTION_MIN_LEDGER", "RETENTION_BATCH_SIZE",
@@ -34,8 +40,25 @@ var envKeys = []string{
 	"METRICS_ENABLED", "ENABLE_METRICS", "CACHE_PRIVATE", "COMPRESS_MIN_SIZE",
 	"EXPORT_MAX_RANGE", "REORG_CONFIRMATION_WINDOW", "REORG_RESCAN_INTERVAL",
 	"SWEEP_CONCURRENCY", "API_MAX_LIMIT",
+	"STATS_CACHE_TTL",
 	"CORS_ALLOWED_ORIGINS", "CORS_ALLOWED_METHODS", "CORS_ALLOWED_HEADERS",
 	"CORS_EXPOSED_HEADERS", "GRAPHQL_PLAYGROUND",
+}
+
+func TestLoad_FileBackedSecrets(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := dir + "/database_url.txt"
+	require.NoError(t, os.WriteFile(dbPath, []byte("postgres://user:pass@localhost/db\n"), 0o600))
+	rpcPath := dir + "/rpc_url.txt"
+	require.NoError(t, os.WriteFile(rpcPath, []byte("https://user:pass@rpc.example.com\n"), 0o600))
+
+	t.Setenv("DATABASE_URL_FILE", dbPath)
+	t.Setenv("RPC_URL_FILE", rpcPath)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://user:pass@localhost/db", cfg.DatabaseURL)
+	assert.Equal(t, "https://user:pass@rpc.example.com", cfg.RPCURL)
 }
 
 func TestLoad(t *testing.T) {
@@ -53,9 +76,13 @@ func TestLoad(t *testing.T) {
 				assert.Equal(t, ":8080", c.HTTPAddr)
 				assert.Equal(t, uint32(17280), c.RetentionLedgers)
 				assert.Equal(t, uint32(120960), c.PartitionLedgerSpan)
+				assert.Equal(t, uint(1000), c.IngestPageSize)
+				assert.Equal(t, uint(1000), c.IngestBatchSize)
 				assert.Empty(t, c.WatchedContracts)
 				assert.Equal(t, uint32(100), c.LagWarnLedgers,
 					"LagWarnLedgers default lets the lag alarm work out of the box")
+				assert.Equal(t, 5*time.Second, c.StatsCacheTTL,
+					"StatsCacheTTL defaults to 5s")
 			},
 		},
 		{
@@ -296,6 +323,34 @@ func TestLoad(t *testing.T) {
 				"RETENTION_BATCH_SIZE": "0",
 			},
 			wantErr: "RETENTION_BATCH_SIZE must be positive",
+		},
+		{
+			name: "ingest sizes configurable",
+			env: map[string]string{
+				"DATABASE_URL":      "postgres://localhost/db",
+				"INGEST_PAGE_SIZE":  "250",
+				"INGEST_BATCH_SIZE": "75",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, uint(250), c.IngestPageSize)
+				assert.Equal(t, uint(75), c.IngestBatchSize)
+			},
+		},
+		{
+			name: "zero ingest page size rejected",
+			env: map[string]string{
+				"DATABASE_URL":     "postgres://localhost/db",
+				"INGEST_PAGE_SIZE": "0",
+			},
+			wantErr: "INGEST_PAGE_SIZE must be positive",
+		},
+		{
+			name: "zero ingest batch size rejected",
+			env: map[string]string{
+				"DATABASE_URL":      "postgres://localhost/db",
+				"INGEST_BATCH_SIZE": "0",
+			},
+			wantErr: "INGEST_BATCH_SIZE must be positive",
 		},
 		{
 			name: "bad retention pause",
@@ -540,6 +595,43 @@ func TestLoad(t *testing.T) {
 			wantErr: "MaxEventsPerCycle",
 		},
 
+		// --- event batch sizing / backpressure -------------------------------------
+		{
+			name: "BATCH_SIZE defaults to disabled",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/db",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, uint(0), c.BatchSize,
+					"zero is the documented 'batching disabled' default")
+				assert.Equal(t, time.Duration(0), c.BatchTargetLatency)
+				assert.Equal(t, time.Second, c.BatchMaxBackoff,
+					"BatchMaxBackoff has a 1s default")
+			},
+		},
+		{
+			name: "BATCH_SIZE parsed with target latency and backoff",
+			env: map[string]string{
+				"DATABASE_URL":         "postgres://localhost/db",
+				"BATCH_SIZE":           "500",
+				"BATCH_TARGET_LATENCY": "50ms",
+				"BATCH_MAX_BACKOFF":    "2s",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, uint(500), c.BatchSize)
+				assert.Equal(t, 50*time.Millisecond, c.BatchTargetLatency)
+				assert.Equal(t, 2*time.Second, c.BatchMaxBackoff)
+			},
+		},
+		{
+			name: "negative BATCH_MAX_BACKOFF rejected",
+			env: map[string]string{
+				"DATABASE_URL":      "postgres://localhost/db",
+				"BATCH_MAX_BACKOFF": "-1s",
+			},
+			wantErr: "BATCH_MAX_BACKOFF must be non-negative",
+		},
+
 		// --- missing/invalid env combinations (gap coverage) -----------------------
 
 		{
@@ -746,6 +838,16 @@ func TestLoad(t *testing.T) {
 				"API_MAX_LIMIT": "-1",
 			},
 			wantErr: "API_MAX_LIMIT",
+		},
+		{
+			name: "STATS_CACHE_TTL configurable",
+			env: map[string]string{
+				"DATABASE_URL":    "postgres://localhost/db",
+				"STATS_CACHE_TTL": "30s",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, 30*time.Second, c.StatsCacheTTL)
+			},
 		},
 		{
 			name: "SWEEP_CONCURRENCY zero rejected",
@@ -1091,6 +1193,56 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestNewLogHandler(t *testing.T) {
+	tests := []struct {
+		name     string
+		format   string
+		wantJSON bool
+	}{
+		{name: "json selects the JSON handler", format: "json", wantJSON: true},
+		{name: "JSON is accepted case-insensitively", format: "JSON", wantJSON: true},
+		{name: "surrounding whitespace is trimmed", format: " json ", wantJSON: true},
+		{name: "text selects the text handler", format: "text"},
+		{name: "TEXT is accepted case-insensitively", format: "TEXT"},
+		{name: "empty format falls back to text", format: ""},
+		{name: "unknown format falls back to text", format: "xml"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewLogHandler(io.Discard, tt.format, nil)
+			_, isJSON := h.(*slog.JSONHandler)
+			_, isText := h.(*slog.TextHandler)
+			if tt.wantJSON {
+				assert.True(t, isJSON, "expected a *slog.JSONHandler for format %q", tt.format)
+				assert.False(t, isText, "expected no *slog.TextHandler for format %q", tt.format)
+			} else {
+				assert.True(t, isText, "expected a *slog.TextHandler for format %q", tt.format)
+				assert.False(t, isJSON, "expected no *slog.JSONHandler for format %q", tt.format)
+			}
+		})
+	}
+}
+
+func TestNewLogHandlerHonorsOptions(t *testing.T) {
+	var buf bytes.Buffer
+	h := NewLogHandler(&buf, "json", &slog.HandlerOptions{Level: slog.LevelWarn})
+	logger := slog.New(h)
+	logger.Info("dropped")
+	logger.Warn("kept")
+
+	var lines []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &parsed))
+		lines = append(lines, parsed)
+	}
+	require.Len(t, lines, 1, "level filter must be honored by the selected handler")
+	assert.Equal(t, "kept", lines[0]["msg"])
+}
+
 func TestValidOrigin(t *testing.T) {
 	assert.True(t, ValidOrigin("*"))
 	assert.True(t, ValidOrigin("https://app.example.com"))
@@ -1234,4 +1386,49 @@ func TestLoad_MultiTenancy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseStartLedger(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		latest  uint32
+		want    uint32
+		wantErr string
+	}{
+		{name: "absolute", raw: "12345", want: 12345},
+		{name: "absolute min ledger 2", raw: "2", want: 2},
+		{name: "absolute below min ledger rejected", raw: "1", wantErr: "must be >= 2"},
+		{name: "relative offset", raw: "latest-1000", latest: 50000, want: 49000},
+		{name: "relative offset clamps to 2", raw: "latest-100000", latest: 50000, want: 2},
+		{name: "relative offset no latest", raw: "latest-1000", wantErr: "not available"},
+		{name: "relative offset zero", raw: "latest-0", wantErr: "offset must be a positive"},
+		{name: "empty", raw: "", want: 0},
+		{name: "invalid", raw: "abc", wantErr: "not an absolute"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got uint32
+			var err error
+			if tt.latest > 0 {
+				got, err = ParseStartLedger(tt.raw, tt.latest)
+			} else {
+				got, err = ParseStartLedger(tt.raw)
+			}
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestLoadStartLedgerRaw(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+	t.Setenv("START_LEDGER_RAW", "latest-500")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "latest-500", cfg.StartLedgerRaw)
 }
