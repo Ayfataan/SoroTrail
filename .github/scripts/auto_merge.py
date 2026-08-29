@@ -24,7 +24,7 @@ account at risk, which is the opposite of what this is for.
 import json
 import os
 import subprocess
-import sys
+import tempfile
 import time
 
 REPO = os.environ.get("REPO", "sorotrail/SoroTrail")
@@ -112,15 +112,24 @@ def comment_once(pr, state, text):
         return
     body = "%s\nstate: %s\n\n%s\n\n*Posted automatically by the auto-merge workflow.*" % (
         MARKER, state, text)
-    path = os.path.join(os.environ.get("RUNNER_TEMP", "."), "comment.md")
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(body)
     if DRY_RUN:
         log(pr, "[dry-run] would comment: %s" % state)
         return
-    code, _, err = gh("pr", "comment", str(pr), "--repo", REPO, "--body-file", path)
-    if code != 0:
-        log(pr, "could not comment: %s" % err.strip())
+    # A real temp file, not the working directory: run locally, the previous
+    # version dropped a comment.md next to the checkout, where it could be
+    # committed by accident.
+    fd, path = tempfile.mkstemp(prefix="automerge-comment-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
+        code, _, err = gh("pr", "comment", str(pr), "--repo", REPO, "--body-file", path)
+        if code != 0:
+            log(pr, "could not comment: %s" % err.strip())
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def check_state(pr, sha, required):
