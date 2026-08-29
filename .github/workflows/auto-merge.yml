@@ -78,13 +78,24 @@ jobs:
           BASE_BRANCH: main
 
           # --- policy knobs -------------------------------------------------
-          # Opt-in by label. This defaults to on deliberately: this repository
-          # takes pull requests from many external contributors, and "CI is
-          # green" is not the same as "this code is safe to run". A passing
-          # test suite says nothing about what the change actually does.
-          # Set REQUIRE_LABEL to false only if you are comfortable merging any
-          # green external contribution without a human looking at it.
-          REQUIRE_LABEL: "true"
+          # Merge any pull request meeting the criteria, with no opt-in label.
+          # This is a deliberate maintainer decision.
+          #
+          # In practice: every pull request that compiles, passes the required
+          # checks, has no conflict and is up to date is merged into main
+          # without a human reading it. Every open pull request here comes from
+          # a fork, so that includes contributors with no prior relationship to
+          # the project.
+          #
+          # A green CI run means the code builds and the tests pass. It does not
+          # mean the change is safe - nothing here inspects what the code does.
+          # Changes touching the tenant boundary (store.Scope), credential
+          # handling, workflow files, or dependencies deserve a human eye.
+          #
+          # To narrow this later without going back to labels for everyone, set
+          # TRUSTED_AUTHORS and flip this to "true": listed authors merge
+          # automatically, everyone else needs the label.
+          REQUIRE_LABEL: "false"
           AUTOMERGE_LABEL: automerge
 
           # Authors who may merge without the label. Leave empty to require it
