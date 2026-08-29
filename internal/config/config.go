@@ -315,7 +315,7 @@ type Config struct {
 	// response headers. X-Request-ID is set on every response by the API's
 	// request logger (#29), so it is the default; an operator can extend
 	// the list or empty it to suppress the header entirely.
-	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID,X-RateLimit-Remaining"`
+	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID,X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset"`
 }
 
 // Load reads configuration from the environment and validates it.
