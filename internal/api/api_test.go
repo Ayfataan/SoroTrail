@@ -617,6 +617,10 @@ func TestListEvents_BadParams(t *testing.T) {
 		"/events?cursor=e1%3BDROP",
 		"/events?cursor=%3Cscript%3E",
 		"/events?cursor=cursor%27OR%271%3D%271",
+		"/events?topic={\"symbol\":\"transfer\"",
+		"/events?topic=[1,2",
+		"/events?from_ledger=0",
+		"/events?to_ledger=0",
 		"/events?topic_contains=not-valid-json",
 		"/events?has_value=maybe",
 	} {
