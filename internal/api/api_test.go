@@ -117,6 +117,7 @@ type stubStore struct {
 	lastExcludeID string
 
 	stats            store.Stats
+	statsCalls       int // number of Stats calls (to observe caching)
 	pingErr          error
 	watchedList      []store.WatchedContract
 	watchedListErr   error
@@ -296,8 +297,13 @@ func (s *stubStore) MigrationVersion(context.Context) (int, bool, error) {
 	return v, s.migrationDirty, nil
 }
 
-func (s *stubStore) Stats(context.Context, store.Scope) (store.Stats, error) { return s.stats, nil }
-func (s *stubStore) Ping(context.Context) error                              { return s.pingErr }
+func (s *stubStore) Stats(_ context.Context, _ store.Scope) (store.Stats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statsCalls++
+	return s.stats, nil
+}
+func (s *stubStore) Ping(context.Context) error { return s.pingErr }
 func (s *stubStore) ListWatchedContracts(context.Context) ([]store.WatchedContract, error) {
 	return s.watchedList, s.watchedListErr
 }
@@ -1018,6 +1024,110 @@ func TestContractEvents_EmitsPaginationLinks(t *testing.T) {
 	assert.NotContains(t, linkHeader, `cursor=prev-cursor`)
 }
 
+// TestPaginatedListEndpoints_EmitsPaginationLinks covers the RFC 5988
+// Link header on the remaining cursor-paginated list endpoints: contracts,
+// dead letters, and address events. Each must advertise rel="next" when a
+// continuation cursor exists, rel="prev" when the caller supplied a
+// cursor, and preserve every other query parameter in the links.
+func TestPaginatedListEndpoints_EmitsPaginationLinks(t *testing.T) {
+	t.Run("contracts emits next and preserves filters", func(t *testing.T) {
+		st := &stubStore{
+			listContractsResult: []store.ContractSummary{
+				{ContractID: testContract, EventCount: 10},
+			},
+			listContractsCursor: "c1",
+		}
+		resp, _ := doGet(t, newTestServer(st, nil), "/contracts?limit=2&sort=count")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		linkHeader := resp.Header.Get("Link")
+		assert.Contains(t, linkHeader, `rel="next"`)
+		assert.Contains(t, linkHeader, `cursor=c1`)
+		assert.Contains(t, linkHeader, `limit=2`)
+		assert.Contains(t, linkHeader, `sort=count`)
+		assert.NotContains(t, linkHeader, `rel="prev"`,
+			"no caller cursor was supplied, so no prev link")
+	})
+
+	t.Run("contracts emits prev when the caller supplied a cursor", func(t *testing.T) {
+		st := &stubStore{
+			listContractsResult: []store.ContractSummary{
+				{ContractID: testContract, EventCount: 10},
+			},
+			listContractsCursor: "c2",
+		}
+		resp, _ := doGet(t, newTestServer(st, nil), "/contracts?cursor=prev-c&limit=2")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		linkHeader := resp.Header.Get("Link")
+		assert.Contains(t, linkHeader, `rel="prev"`)
+		assert.Contains(t, linkHeader, `rel="next"`)
+		assert.NotContains(t, linkHeader, `cursor=prev-c`)
+	})
+
+	t.Run("dead-letters emits next and preserves filters", func(t *testing.T) {
+		st := &stubStore{
+			deadLettersResult: []store.DeadLetter{{ID: 1}},
+			deadLettersCursor: "dl-c1",
+		}
+		resp, _ := doGetWithAuth(t, newTestServer(st, nil),
+			"/dead-letters?contract_id="+testContract+"&limit=2", "test-key")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		linkHeader := resp.Header.Get("Link")
+		assert.Contains(t, linkHeader, `rel="next"`)
+		assert.Contains(t, linkHeader, `cursor=dl-c1`)
+		assert.Contains(t, linkHeader, `contract_id=`+testContract)
+		assert.Contains(t, linkHeader, `limit=2`)
+	})
+
+	t.Run("dead-letters emits prev when the caller supplied a cursor", func(t *testing.T) {
+		st := &stubStore{
+			deadLettersResult: []store.DeadLetter{{ID: 1}},
+			deadLettersCursor: "dl-c2",
+		}
+		resp, _ := doGetWithAuth(t, newTestServer(st, nil),
+			"/dead-letters?cursor=dl-prev&limit=2", "test-key")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		linkHeader := resp.Header.Get("Link")
+		assert.Contains(t, linkHeader, `rel="prev"`)
+		assert.Contains(t, linkHeader, `rel="next"`)
+		assert.NotContains(t, linkHeader, `cursor=dl-prev`)
+	})
+
+	t.Run("address events emits next and preserves filters", func(t *testing.T) {
+		st := &stubStore{
+			addressEvents: []store.Event{{ID: "e1"}},
+			addressCursor: "a-c1",
+		}
+		resp, _ := doGet(t, newTestServer(st, nil),
+			"/addresses/"+testAddress+"/events?from_ledger=100&limit=2")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		linkHeader := resp.Header.Get("Link")
+		assert.Contains(t, linkHeader, `rel="next"`)
+		assert.Contains(t, linkHeader, `cursor=a-c1`)
+		assert.Contains(t, linkHeader, `from_ledger=100`)
+		assert.Contains(t, linkHeader, `limit=2`)
+	})
+
+	t.Run("address events emits prev when the caller supplied a cursor", func(t *testing.T) {
+		st := &stubStore{
+			addressEvents: []store.Event{{ID: "e1"}},
+			addressCursor: "a-c2",
+		}
+		resp, _ := doGet(t, newTestServer(st, nil),
+			"/addresses/"+testAddress+"/events?cursor=a-prev&limit=2")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		linkHeader := resp.Header.Get("Link")
+		assert.Contains(t, linkHeader, `rel="prev"`)
+		assert.Contains(t, linkHeader, `rel="next"`)
+		assert.NotContains(t, linkHeader, `cursor=a-prev`)
+	})
+}
+
 func TestListEvents_IncludeXDR(t *testing.T) {
 	event := store.Event{
 		ID:          "e1",
@@ -1285,8 +1395,13 @@ func TestLivez(t *testing.T) {
 
 func TestReadyz(t *testing.T) {
 	t.Run("all healthy", func(t *testing.T) {
-		resp, _ := doGet(t, newTestServer(&stubStore{}, nil), "/readyz")
+		resp, body := doGet(t, newTestServer(&stubStore{}, nil), "/readyz")
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		var h healthResponse
+		require.NoError(t, json.Unmarshal(body, &h))
+		assert.Equal(t, "ok", h.Status)
+		assert.Equal(t, "ok", h.Checks["database"])
+		assert.Equal(t, "ok", h.Checks["rpc"])
 	})
 
 	t.Run("db down returns 503 with reason", func(t *testing.T) {
@@ -1431,6 +1546,69 @@ func TestStats(t *testing.T) {
 		assert.Contains(t, raw, "ingest_lag_ledgers")
 		assert.Nil(t, raw["ingest_lag_ledgers"])
 		assert.Equal(t, uint64(0), got.QueryErrors, "query_errors should be present and zero")
+	})
+}
+
+// TestStats_Cache verifies the /stats TTL cache end-to-end: repeated calls
+// within the window hit the cache (the store is consulted once), and the value
+// refreshes after the TTL expires.
+func TestStats_Cache(t *testing.T) {
+	t.Run("repeated calls within TTL hit the cache", func(t *testing.T) {
+		st := &stubStore{stats: store.Stats{TotalEvents: 42, LastIngestedLedger: 999}}
+		s := newTestServer(st, nil)
+		s.SetStatsTTL(30 * time.Second)
+
+		resp1, body1 := doGet(t, s, "/stats")
+		require.Equal(t, http.StatusOK, resp1.StatusCode, string(body1))
+		resp2, body2 := doGet(t, s, "/stats")
+		require.Equal(t, http.StatusOK, resp2.StatusCode, string(body2))
+
+		require.Equal(t, 1, st.statsCalls,
+			"both requests inside the TTL must be served from cache, so the store is hit once")
+		assert.Equal(t, string(body1), string(body2), "cached responses must be identical")
+		var got store.Stats
+		require.NoError(t, json.Unmarshal(body2, &got))
+		assert.Equal(t, int64(42), got.TotalEvents)
+	})
+
+	t.Run("values refresh after expiry", func(t *testing.T) {
+		st := &stubStore{stats: store.Stats{TotalEvents: 42, LastIngestedLedger: 999}}
+		s := newTestServer(st, nil)
+		s.SetStatsTTL(30 * time.Millisecond)
+
+		_, _ = doGet(t, s, "/stats")
+		_, _ = doGet(t, s, "/stats")
+		require.Equal(t, 1, st.statsCalls, "first two calls within TTL cache")
+
+		// Let the TTL elapse, then the next call must recompute.
+		time.Sleep(50 * time.Millisecond)
+		_, body := doGet(t, s, "/stats")
+		require.Equal(t, 2, st.statsCalls, "after expiry the store is consulted again")
+
+		var got store.Stats
+		require.NoError(t, json.Unmarshal(body, &got))
+		assert.Equal(t, int64(42), got.TotalEvents, "refreshed value is present")
+	})
+
+	t.Run("zero TTL disables caching", func(t *testing.T) {
+		st := &stubStore{stats: store.Stats{TotalEvents: 1}}
+		s := newTestServer(st, nil) // default TTL 0 disables caching
+
+		_, _ = doGet(t, s, "/stats")
+		_, _ = doGet(t, s, "/stats")
+		require.Equal(t, 2, st.statsCalls, "without a configured TTL every request recomputes")
+	})
+
+	t.Run("no-store header retained on cached hits", func(t *testing.T) {
+		st := &stubStore{stats: store.Stats{TotalEvents: 1}}
+		s := newTestServer(st, nil)
+		s.SetStatsTTL(30 * time.Second)
+
+		resp1, _ := doGet(t, s, "/stats")
+		resp2, _ := doGet(t, s, "/stats")
+		require.Equal(t, http.StatusOK, resp1.StatusCode)
+		require.Equal(t, "no-store", resp1.Header.Get("Cache-Control"))
+		require.Equal(t, "no-store", resp2.Header.Get("Cache-Control"), "cached /stats must stay no-store")
 	})
 }
 
@@ -2574,6 +2752,20 @@ func TestListEvents_ConfigurableMaxLimit(t *testing.T) {
 	}
 }
 
+// The API's default page cap must stay aligned with the store's hard
+// clamp: both default to 500, and raising API_MAX_LIMIT above
+// store.MaxQueryLimit would let the API accept a limit the store then
+// silently clamps, so a caller would get a short page with no error.
+// See the comments on store.MaxQueryLimit and maxLimit in server.go.
+func TestMaxLimitAlignsWithStoreClamp(t *testing.T) {
+	SetMaxLimit(500) // restore the default; other tests may have changed it
+	t.Cleanup(func() { SetMaxLimit(500) })
+
+	assert.Equal(t, store.MaxQueryLimit, maxLimit,
+		"API default maxLimit and store.MaxQueryLimit must stay in lockstep; "+
+			"an API_MAX_LIMIT above store.MaxQueryLimit is silently clamped by the store")
+}
+
 func TestGetEventTransaction_Success(t *testing.T) {
 	st := &stubStore{
 		event: store.Event{ID: "0001-0001", TxHash: "abc123"},
@@ -2701,4 +2893,8 @@ func (m *stubStore) CountDeadLetters(context.Context, string) (int64, error) {
 }
 func (m *stubStore) CountDeliveryAttempts(context.Context, int64, store.SubscriptionOwner) (int64, error) {
 	return m.deliveryAttemptsCount, m.deliveryAttemptsCountErr
+}
+
+func (s *stubStore) CountEventsBefore(context.Context, int64, time.Time, int) (int64, error) {
+	return 0, nil
 }

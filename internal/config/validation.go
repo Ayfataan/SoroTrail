@@ -11,7 +11,12 @@ import (
 // sensitiveEnvVars lists environment variable names whose values must be
 // redacted in any log output to prevent credential leakage.
 var sensitiveEnvVars = map[string]bool{
-	"DATABASE_URL": true,
+	"DATABASE_URL":               true,
+	"RPC_URL":                    true,
+	"RPC_URLS":                   true,
+	"API_KEY":                    true,
+	"ARCHIVE_SECRET_ACCESS_KEY":  true,
+	"MULTI_TENANT_BOOTSTRAP_KEY": true,
 }
 
 // redact returns value unchanged unless name is a known sensitive variable,
@@ -20,7 +25,13 @@ func redact(name, value string) string {
 	if value == "" || !sensitiveEnvVars[name] {
 		return value
 	}
-	return redactURLPassword(value)
+	if name == "DATABASE_URL" || name == "RPC_URL" || name == "RPC_URLS" {
+		if u, err := url.Parse(value); err == nil && u.Scheme != "" && u.Host != "" {
+			return redactURLPassword(value)
+		}
+		return "<redacted>"
+	}
+	return "***"
 }
 
 func redactURLPassword(raw string) string {
@@ -80,8 +91,7 @@ func (c Config) ValidateAll() error {
 	} else if c.RPCURL == "" {
 		errs = append(errs, "RPC_URL: required but empty")
 	} else if u, err := url.Parse(c.RPCURL); err != nil || u.Scheme == "" || u.Host == "" {
-		errs = append(errs, fmt.Sprintf("RPC_URL: %q is not a valid absolute URL (want scheme://host)",
-			redact("RPC_URL", c.RPCURL)))
+		errs = append(errs, fmt.Sprintf("RPC_URL: %q is not a valid absolute URL (want scheme://host)", c.RPCURL))
 	}
 
 	// --- duration format ----------------------------------------------------
@@ -128,6 +138,12 @@ func (c Config) ValidateAll() error {
 	}
 	if c.RateLimitBurst < 0 {
 		errs = append(errs, fmt.Sprintf("RATE_LIMIT_BURST: %d must be non-negative", c.RateLimitBurst))
+	}
+	if c.HourlyQuota < 0 {
+		errs = append(errs, fmt.Sprintf("HOURLY_QUOTA: %d must be non-negative", c.HourlyQuota))
+	}
+	if c.DailyQuota < 0 {
+		errs = append(errs, fmt.Sprintf("DAILY_QUOTA: %d must be non-negative", c.DailyQuota))
 	}
 
 	// --- allowed values -----------------------------------------------------

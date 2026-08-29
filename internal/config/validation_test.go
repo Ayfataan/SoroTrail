@@ -279,6 +279,7 @@ func validBase() Config {
 		AuditMaxRepair:      3,
 		AuditFindingMaxLgrs: 100,
 		LogLevel:            "info",
+		LogFormat:           "text",
 	}
 }
 
