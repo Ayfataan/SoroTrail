@@ -343,7 +343,9 @@ func nextRateLimitReset(lim *rate.Limiter) time.Time {
 	if tokens >= 1 {
 		return time.Now().Add(time.Second)
 	}
-	wait := time.Duration((1.0-tokens)/float64(limit) * float64(time.Second))
+	wait := time.Duration(
+		(1.0 - tokens) / float64(limit) * float64(time.Second),
+	)
 	if wait <= 0 {
 		wait = time.Second
 	}
