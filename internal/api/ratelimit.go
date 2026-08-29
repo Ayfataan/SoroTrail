@@ -263,7 +263,7 @@ func (l *RateLimiter) Middleware(next http.Handler) http.Handler {
 			// configured with rate_limit_rps=0 is meant to be shut off,
 			// and silently falling back to the instance default would
 			// hand them unlimited access instead.
-			l.writeLimited(w, time.Second)
+			l.writeLimited(w, time.Second, burst)
 			return
 		}
 		if !resolved {
@@ -286,13 +286,13 @@ func (l *RateLimiter) Middleware(next http.Handler) http.Handler {
 		if !rsv.OK() {
 			// We use burst >= 1 in our validator so n>max tokens is not
 			// reachable; report a conservative retry-after just in case.
-			l.writeLimited(w, l.idleTTL)
+			l.writeLimited(w, l.idleTTL, burst)
 			return
 		}
 		delay := rsv.Delay()
 		if delay > 0 {
 			rsv.Cancel()
-			l.writeLimited(w, ceilSeconds(delay))
+			l.writeLimited(w, ceilSeconds(delay), burst)
 			return
 		}
 		if l.quotaEnabled() {
@@ -300,25 +300,66 @@ func (l *RateLimiter) Middleware(next http.Handler) http.Handler {
 			remaining, retryAfter, ok := l.checkQuota(entry)
 			l.mu.Unlock()
 			if !ok {
-				l.writeLimited(w, retryAfter)
+				l.writeLimited(w, retryAfter, burst)
 				return
 			}
-			w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(remaining, 10))
+			l.setRateLimitHeaders(w, burst, remaining, time.Now().Add(retryAfter))
+		} else {
+			remaining := int64(lim.Tokens())
+			if remaining < 0 {
+				remaining = 0
+			}
+			if remaining > int64(burst) {
+				remaining = int64(burst)
+			}
+			l.setRateLimitHeaders(w, burst, remaining, nextRateLimitReset(lim))
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+func (l *RateLimiter) setRateLimitHeaders(w http.ResponseWriter, burst int, remaining int64, resetAt time.Time) {
+	if burst > 0 {
+		w.Header().Set("X-RateLimit-Limit", strconv.Itoa(burst))
+	}
+	if remaining < 0 {
+		remaining = 0
+	}
+	w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(remaining, 10))
+	if !resetAt.IsZero() {
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetAt.Unix(), 10))
+	}
+}
+
+func nextRateLimitReset(lim *rate.Limiter) time.Time {
+	if lim == nil {
+		return time.Time{}
+	}
+	limit := lim.Limit()
+	if limit <= 0 {
+		return time.Time{}
+	}
+	tokens := lim.Tokens()
+	if tokens >= 1 {
+		return time.Now().Add(time.Second)
+	}
+	wait := time.Duration((1.0-tokens)/float64(limit) * float64(time.Second))
+	if wait <= 0 {
+		wait = time.Second
+	}
+	return time.Now().Add(wait)
+}
+
 // writeLimited sends a 429 with the standard error envelope and a
 // Retry-After header rounded up to whole seconds (RFC 7231 §7.1.3
 // accepts delta-seconds as a non-negative integer).
-func (l *RateLimiter) writeLimited(w http.ResponseWriter, retryAfter time.Duration) {
+func (l *RateLimiter) writeLimited(w http.ResponseWriter, retryAfter time.Duration, burst int) {
 	secs := int(retryAfter.Seconds())
 	if secs < 1 {
 		secs = 1
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
-	w.Header().Set("X-RateLimit-Remaining", "0")
+	l.setRateLimitHeaders(w, burst, 0, time.Now().Add(retryAfter))
 	writeError(w, http.StatusTooManyRequests,
 		errors.New("rate limit exceeded; retry later"))
 }
