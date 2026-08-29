@@ -217,7 +217,7 @@ the struct tags in `internal/config/config.go` to prevent drift.
 | `CORS_ALLOWED_ORIGINS` | CSV | empty | Browser origins allowed to call the API cross-origin. `*` allows any origin; otherwise each entry must be an explicit `scheme://host`. Empty = CORS disabled. Invalid entries (e.g. `null`, origins with a path) fail startup. |
 | `CORS_ALLOWED_METHODS` | CSV | `GET,POST,PUT,DELETE,OPTIONS` | Methods returned on preflight (`OPTIONS`) responses. |
 | `CORS_ALLOWED_HEADERS` | CSV | `Content-Type,X-API-Key,Accept` | Headers returned on preflight responses. |
-| `CORS_EXPOSED_HEADERS` | CSV | `X-Request-ID` | Response headers browser JavaScript may read via `Access-Control-Expose-Headers`. Empty suppresses the header entirely. |
+| `CORS_EXPOSED_HEADERS` | CSV | `X-Request-ID,X-RateLimit-Remaining` | Response headers browser JavaScript may read via `Access-Control-Expose-Headers`. Empty suppresses the header entirely. |
 
 ### Rate limiting
 
@@ -226,6 +226,8 @@ the struct tags in `internal/config/config.go` to prevent drift.
 | `RATE_LIMIT_RPS` | float | `0` (disabled) | Per-client HTTP request rate limit (`requests/second`). Must be set together with `RATE_LIMIT_BURST`; setting only one fails startup. |
 | `RATE_LIMIT_BURST` | int | `0` (disabled) | Maximum instantaneous burst size for the rate limiter. Pairs with `RATE_LIMIT_RPS`. |
 | `RATE_LIMIT_TRUSTED_PROXY` | bool | `false` | Honor `X-Forwarded-For` for client IP detection. Only enable behind a trusted proxy that strips/rewrites the header. |
+| `HOURLY_QUOTA` | int64 | `0` (disabled) | Maximum requests a single client may issue in a rolling 1-hour window. `0` disables the quota. |
+| `DAILY_QUOTA` | int64 | `0` (disabled) | Maximum requests a single client may issue in a rolling 24-hour window. `0` disables the quota. |
 
 ### Audit
 
