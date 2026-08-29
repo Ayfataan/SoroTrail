@@ -24,6 +24,7 @@ import (
 
 	"github.com/sorotrail/sorotrail/internal/api"
 	"github.com/sorotrail/sorotrail/internal/api/graphql"
+	"github.com/sorotrail/sorotrail/internal/archive"
 	"github.com/sorotrail/sorotrail/internal/audit"
 	"github.com/sorotrail/sorotrail/internal/broadcast"
 	"github.com/sorotrail/sorotrail/internal/config"
@@ -75,6 +76,8 @@ func dispatch(args []string) error {
 			os.Exit(code)
 		}
 		return nil
+	case "schema-inspect":
+		return runSchemaInspect(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -98,6 +101,8 @@ subcommands:
                (sorotrail index-addresses --help)
   healthcheck  probe /health and exit (used by docker HEALTHCHECK)
                (sorotrail healthcheck --help)
+  schema-inspect  report migration state, partitions, and table sizes
+               (sorotrail schema-inspect --help)
 `)
 }
 
@@ -248,12 +253,19 @@ func run() error {
 	ing := ingester.New(countingClient, st, decode.XDRDecoder{}, log, ingester.Options{
 		PollInterval:            cfg.PollInterval,
 		StartLedger:             cfg.StartLedger,
+		StartLedgerRaw:          cfg.StartLedgerRaw,
 		RetentionLedgers:        cfg.RetentionLedgers,
+		PageLimit:               cfg.IngestPageSize,
+		WriteBatchSize:          cfg.IngestBatchSize,
 		LagWarnLedgers:          cfg.LagWarnLedgers,
 		SweepConcurrency:        cfg.SweepConcurrency,
 		MaxEventsPerCycle:       cfg.MaxEventsPerCycle,
+		BatchSize:               cfg.BatchSize,
+		BatchTargetLatency:      cfg.BatchTargetLatency,
+		BatchMaxBackoff:         cfg.BatchMaxBackoff,
 		ReorgConfirmationWindow: cfg.ReorgConfirmationWindow,
 		ReorgRescanInterval:     cfg.ReorgRescanInterval,
+		Network:                 cfg.Network,
 	}).WithBroadcaster(bcast)
 	ing.SetNotifier(wh)
 	// Wire the same store as the dead-letter sink: events that fail to
@@ -287,20 +299,54 @@ func run() error {
 	// RETENTION_MIN_LEDGER is set, the pruner is a no-op goroutine that
 	// returns immediately. Only when at least one retention policy is
 	// configured does it allocate a goroutine and a metrics struct.
-	prn := pruner.New(st, log, pruner.Options{
-		MaxAge:    cfg.RetentionMaxAge,
-		MinLedger: cfg.RetentionMinLedger,
-		BatchSize: cfg.RetentionBatchSize,
-		Pause:     cfg.RetentionPause,
-		Interval:  cfg.RetentionInterval,
-	})
+	//
+	// When ARCHIVE_BUCKET is set, an archiver is created to export events
+	// to S3-compatible storage before pruning. Archival is optional and
+	// idempotent: without ARCHIVE_* vars, the binary behaves identically
+	// to the pre-archive build.
+	var arch *archive.Archiver
+	if cfg.ArchiveEnabled() {
+		var err error
+		aArchiverOpts := archive.Options{
+			Bucket:          cfg.ArchiveBucket,
+			Prefix:          cfg.ArchivePrefix,
+			Endpoint:        cfg.ArchiveEndpoint,
+			Region:          cfg.ArchiveRegion,
+			AccessKeyID:     cfg.ArchiveAccessKeyID,
+			SecretAccessKey: cfg.ArchiveSecretAccessKey,
+			UseSSL:          cfg.ArchiveUseSSL,
+			MaxRetries:      cfg.ArchiveMaxRetries,
+			Logger:          log,
+		}
+		arch, err = archive.New(st, aArchiverOpts)
+		if err != nil {
+			return fmt.Errorf("initializing archive: %w", err)
+		}
+		log.Info("archive enabled",
+			"bucket", cfg.ArchiveBucket,
+			"prefix", cfg.ArchivePrefix,
+			"before_prune", cfg.ArchiveBeforePrune,
+		)
+	}
+
+	prn := pruner.NewWithArchiver(st, log, pruner.Options{
+		MaxAge:             cfg.RetentionMaxAge,
+		MinLedger:          cfg.RetentionMinLedger,
+		BatchSize:          cfg.RetentionBatchSize,
+		Pause:              cfg.RetentionPause,
+		Interval:           cfg.RetentionInterval,
+		ArchiveBeforePrune: cfg.ArchiveBeforePrune,
+	}, arch)
 	if cfg.RetentionEnabled() {
 		api.SetPruner(prn)
 	}
 	// Per-client HTTP rate limiter. Disabled when RATE_LIMIT_RPS or
 	// RATE_LIMIT_BURST is unset; the limiter is then a pass-through and
 	// its cleanup goroutine is never started.
-	limiterOpts := []api.LimiterOption{}
+	limiterOpts := []api.LimiterOption{
+		api.WithHourlyQuota(cfg.HourlyQuota),
+		api.WithDailyQuota(cfg.DailyQuota),
+	}
 	if cfg.MultiTenant {
 		// Key buckets on the authenticated tenant rather than the source
 		// IP, so a tenant's quota follows its identity across however many
@@ -321,6 +367,7 @@ func run() error {
 	api.SetMaxLimit(cfg.APIMaxLimit)
 
 	apiServer := api.New(apiStore, countingClient, log, cfg.APIKey, specEnricher).WithBroadcaster(bcast)
+	apiServer.SetStatsTTL(cfg.StatsCacheTTL)
 	apiServer.SetRateLimiter(limiter)
 	apiServer.SetMetricsEnabled(cfg.MetricsEnabled)
 	apiServer.SetCompressMinSize(cfg.CompressMinSize)
@@ -511,14 +558,7 @@ func bootstrapAdminKey(ctx context.Context, ts store.TenantStore, key string, lo
 
 func newLogger(level, format string) *slog.Logger {
 	opts := &slog.HandlerOptions{Level: config.ParseLogLevel(level)}
-	var h slog.Handler
-	switch strings.ToLower(format) {
-	case "json":
-		h = slog.NewJSONHandler(os.Stdout, opts)
-	default:
-		h = slog.NewTextHandler(os.Stdout, opts)
-	}
-	return slog.New(h)
+	return slog.New(config.NewLogHandler(os.Stdout, format, opts))
 }
 
 // graphqlServerDeps wraps the live store + enricher into the typed

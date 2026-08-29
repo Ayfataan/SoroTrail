@@ -1,11 +1,26 @@
 // Package config loads and validates SoroTrail's configuration from
 // environment variables.
+//
+// The entry point is [Load], which parses the environment into a [Config]
+// and calls [Config.Validate]. Every field is settable via the environment
+// variable named in its `env` tag; see .env.example for documentation.
+//
+// Non-obvious contracts:
+//   - DATABASE_URL is the only required variable; all others have safe
+//     defaults.
+//   - [Config.Validate] is idempotent and can be called again after
+//     programmatic mutation.
+//   - [ValidContractID] checks shape only (C prefix, 56 base32 chars),
+//     not the checksum.
 package config
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,13 +29,26 @@ import (
 
 // NetworkConfig describes one Stellar network to index.
 type NetworkConfig struct {
-	Name   string `json:"name"`
-	RPCURL string `json:"rpc_url"`
+	Name       string `json:"name"`
+	RPCURL     string `json:"rpc_url"`
+	Passphrase string `json:"passphrase"`
+}
+
+var networks = map[string]NetworkConfig{
+	"testnet":   {Name: "testnet", RPCURL: "https://soroban-testnet.stellar.org", Passphrase: "Test SDF Network ; September 2015"},
+	"mainnet":   {Name: "mainnet", RPCURL: "https://mainnet.sorobanrpc.com", Passphrase: "Public Global Stellar Network ; September 2015"},
+	"futurenet": {Name: "futurenet", RPCURL: "https://rpc-futurenet.stellar.org", Passphrase: "Test SDF Future Network ; October 2022"},
+}
+
+func NetworkConfigFor(name string) (NetworkConfig, bool) {
+	c, ok := networks[strings.ToLower(strings.TrimSpace(name))]
+	return c, ok
 }
 
 // Config holds all runtime configuration. Every field is settable via the
 // environment variable named in its `env` tag; see .env.example for docs.
 type Config struct {
+	Network string `env:"NETWORK" envDefault:"testnet"`
 	// RPCURL is the single-provider RPC endpoint. When RPC_URLS is set the
 	// multi-provider failover client is used instead and RPC_URL is ignored.
 	RPCURL string `env:"RPC_URL" envDefault:"https://soroban-testnet.stellar.org"`
@@ -43,7 +71,10 @@ type Config struct {
 	HTTPAddr              string        `env:"HTTP_ADDR" envDefault:":8080"`
 	WatchedContracts      []string      `env:"WATCHED_CONTRACTS"`
 	StartLedger           uint32        `env:"START_LEDGER"`
+	StartLedgerRaw        string        `env:"START_LEDGER_RAW"`
 	RetentionLedgers      uint32        `env:"RETENTION_LEDGERS" envDefault:"17280"`
+	IngestPageSize        uint          `env:"INGEST_PAGE_SIZE" envDefault:"1000"`
+	IngestBatchSize       uint          `env:"INGEST_BATCH_SIZE" envDefault:"1000"`
 	PartitionLedgerSpan   uint32        `env:"PARTITION_LEDGER_SPAN" envDefault:"120960"`
 	LogLevel              string        `env:"LOG_LEVEL" envDefault:"info"`
 	LogFormat             string        `env:"LOG_FORMAT" envDefault:"text"`
@@ -59,6 +90,24 @@ type Config struct {
 	RetentionBatchSize int           `env:"RETENTION_BATCH_SIZE" envDefault:"5000"`
 	RetentionPause     time.Duration `env:"RETENTION_PAUSE" envDefault:"100ms"`
 	RetentionInterval  time.Duration `env:"RETENTION_INTERVAL" envDefault:"1h"`
+	// RetentionDryRun, when true, makes the pruner report what it
+	// would delete without actually removing any rows.
+	RetentionDryRun bool `env:"RETENTION_DRY_RUN"`
+
+	// Archive configuration. When ARCHIVE_BUCKET is set, pruned events
+	// are exported to S3-compatible object storage as compressed NDJSON
+	// before deletion, ensuring pruned ranges are recoverable. All
+	// archive_* fields are optional; without them the binary behaves
+	// identically to the pre-archive build.
+	ArchiveBucket          string `env:"ARCHIVE_BUCKET"`
+	ArchivePrefix          string `env:"ARCHIVE_PREFIX"`
+	ArchiveEndpoint        string `env:"ARCHIVE_ENDPOINT"`
+	ArchiveRegion          string `env:"ARCHIVE_REGION"`
+	ArchiveAccessKeyID     string `env:"ARCHIVE_ACCESS_KEY_ID"`
+	ArchiveSecretAccessKey string `env:"ARCHIVE_SECRET_ACCESS_KEY"`
+	ArchiveUseSSL          bool   `env:"ARCHIVE_USE_SSL"`
+	ArchiveBeforePrune     bool   `env:"ARCHIVE_BEFORE_PRUNE" envDefault:"false"`
+	ArchiveMaxRetries      int    `env:"ARCHIVE_MAX_RETRIES" envDefault:"3"`
 
 	// LagWarnLedgers triggers a warn-level log when the ingester falls this
 	// many ledgers behind the chain head. Zero disables the alarm.
@@ -119,6 +168,8 @@ type Config struct {
 	RateLimitRPS          float64 `env:"RATE_LIMIT_RPS"`
 	RateLimitBurst        int     `env:"RATE_LIMIT_BURST"`
 	RateLimitTrustedProxy bool    `env:"RATE_LIMIT_TRUSTED_PROXY" envDefault:"false"`
+	HourlyQuota           int64   `env:"HOURLY_QUOTA"`
+	DailyQuota            int64   `env:"DAILY_QUOTA"`
 
 	// CompressMinSize is the response body size, in bytes, at or above which
 	// responses are gzip/deflate encoded for clients that advertise support.
@@ -132,6 +183,12 @@ type Config struct {
 	// this are rejected with 400; the store still clamps internally as a
 	// safety net. Default 500 (up from the previous hardcoded 200).
 	APIMaxLimit int `env:"API_MAX_LIMIT" envDefault:"500"`
+
+	// StatsCacheTTL is how long GET /stats results are served from the
+	// per-scope cache before being recomputed, short-circuiting the
+	// expensive aggregation on busy endpoints. Zero disables caching.
+	// Default 5s keeps a dial board roughly in pace with ingestion.
+	StatsCacheTTL time.Duration `env:"STATS_CACHE_TTL" envDefault:"5s"`
 
 	// CachePrivate flips the cacheable endpoints from Cache-Control: public
 	// to Cache-Control: private. Set this when the deployment serves
@@ -191,6 +248,23 @@ type Config struct {
 	// disables the cap — identical to the pre-cap behavior.
 	MaxEventsPerCycle uint `env:"MAX_EVENTS_PER_CYCLE"`
 
+	// Event write batching and backpressure. BATCH_SIZE caps the number of
+	// events in each store write (UpsertEvents), splitting a fetched page
+	// into smaller chunks so high-volume chains don't land one giant batch
+	// on the DB at once. Zero (the default) keeps the historical single-
+	// write-per-page behavior bit-for-bit.
+	//
+	// When BATCH_SIZE is set AND BATCH_TARGET_LATENCY is set, the page's
+	// chunk size becomes adaptive: writes measured over the latency budget
+	// cause the chunk size to shrink and a backpressure sleep
+	// (BATCH_MAX_BACKOFF) to be inserted between writes, so a strapped
+	// database gets room to drain rather than being hammered at peak.
+	// BATCH_TARGET_LATENCY zero (the default) means the chunk size is
+	// fixed at BATCH_SIZE and no backpressure is applied.
+	BatchSize          uint          `env:"BATCH_SIZE"`
+	BatchTargetLatency time.Duration `env:"BATCH_TARGET_LATENCY"`
+	BatchMaxBackoff    time.Duration `env:"BATCH_MAX_BACKOFF" envDefault:"1s"`
+
 	// ReorgConfirmationWindow is the number of ledgers behind the ingest
 	// frontier that get re-scanned on a periodic basis to detect and
 	// repair RPC-side reorgs. Once a ledger is more than this many ledgers
@@ -241,12 +315,15 @@ type Config struct {
 	// response headers. X-Request-ID is set on every response by the API's
 	// request logger (#29), so it is the default; an operator can extend
 	// the list or empty it to suppress the header entirely.
-	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID"`
+	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID,X-RateLimit-Remaining"`
 }
 
 // Load reads configuration from the environment and validates it.
 // All validation failures are aggregated into a single error.
 func Load() (Config, error) {
+	if err := resolveFileEnv(); err != nil {
+		return Config{}, fmt.Errorf("resolving *_FILE environment values: %w", err)
+	}
 	var cfg Config
 	if err := env.Parse(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing environment: %w", err)
@@ -254,6 +331,13 @@ func Load() (Config, error) {
 	cfg.WatchedContracts = cleanContractList(cfg.WatchedContracts)
 	cfg.RPCURLS = cleanContractList(cfg.RPCURLS)
 	cfg.CORSAllowedOrigins = cleanOrigins(cfg.CORSAllowedOrigins)
+	cfg.Network = strings.ToLower(strings.TrimSpace(cfg.Network))
+	if _, ok := NetworkConfigFor(cfg.Network); !ok {
+		return Config{}, fmt.Errorf("NETWORK must be one of testnet, mainnet, futurenet; got %q", cfg.Network)
+	}
+	if _, explicitlySet := os.LookupEnv("RPC_URL"); !explicitlySet && len(cfg.RPCURLS) == 0 {
+		cfg.RPCURL = networks[cfg.Network].RPCURL
+	}
 	if err := cfg.ValidateAll(); err != nil {
 		return Config{}, err
 	}
@@ -270,6 +354,31 @@ func Load() (Config, error) {
 }
 
 // IsSQLite reports whether the database URL points to a SQLite database.
+func resolveFileEnv() error {
+	for _, kv := range os.Environ() {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name, filePath := parts[0], parts[1]
+		if !strings.HasSuffix(name, "_FILE") {
+			continue
+		}
+		baseName := strings.TrimSuffix(name, "_FILE")
+		if _, set := os.LookupEnv(baseName); set {
+			continue
+		}
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("%s: reading %q: %w", name, filePath, err)
+		}
+		if err := os.Setenv(baseName, strings.TrimRight(string(data), "\r\n")); err != nil {
+			return fmt.Errorf("%s: setting %s: %w", name, baseName, err)
+		}
+	}
+	return nil
+}
+
 func IsSQLite(databaseURL string) bool {
 	return strings.HasPrefix(databaseURL, "sqlite:")
 }
@@ -286,6 +395,19 @@ func ParseLogLevel(raw string) slog.Level {
 		return slog.LevelError
 	default:
 		return slog.LevelInfo
+	}
+}
+
+// NewLogHandler returns the slog.Handler selected by a LOG_FORMAT value,
+// writing to w with the given options. "json" selects the JSON handler;
+// everything else — including unknown or empty values — falls back to the
+// text handler rather than failing startup (mirrors ParseLogLevel).
+func NewLogHandler(w io.Writer, format string, opts *slog.HandlerOptions) slog.Handler {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "json":
+		return slog.NewJSONHandler(w, opts)
+	default:
+		return slog.NewTextHandler(w, opts)
 	}
 }
 
@@ -383,6 +505,12 @@ func (c Config) Validate() error {
 	if c.RetentionBatchSize <= 0 {
 		return fmt.Errorf("RETENTION_BATCH_SIZE must be positive")
 	}
+	if c.IngestPageSize == 0 {
+		return fmt.Errorf("INGEST_PAGE_SIZE must be positive")
+	}
+	if c.IngestBatchSize == 0 {
+		return fmt.Errorf("INGEST_BATCH_SIZE must be positive")
+	}
 	if c.RetentionPause < 0 {
 		return fmt.Errorf("RETENTION_PAUSE must be non-negative")
 	}
@@ -433,6 +561,17 @@ func (c Config) Validate() error {
 	}
 	// MAX_EVENTS_PER_CYCLE needs no explicit rule: the env parser rejects
 	// negatives (uint), and zero is the documented "disabled" value.
+	// BATCH_TARGET_LATENCY and BATCH_MAX_BACKOFF tune the batching
+	// behavior that only exists when BATCH_SIZE is set, but tolerating
+	// them when batching is off (a config that sets a budget but forgets
+	// the size) is safer than rejecting it — the operator sees a warning
+	// at startup rather than a crash loop only during a deploy review.
+	if c.BatchSize > 0 && c.BatchTargetLatency < 0 {
+		return fmt.Errorf("BATCH_TARGET_LATENCY must be non-negative, got %s", c.BatchTargetLatency)
+	}
+	if c.BatchMaxBackoff < 0 {
+		return fmt.Errorf("BATCH_MAX_BACKOFF must be non-negative, got %s", c.BatchMaxBackoff)
+	}
 	if c.ReorgConfirmationWindow > 0 && c.ReorgRescanInterval <= 0 {
 		return fmt.Errorf("REORG_RESCAN_INTERVAL must be positive when REORG_CONFIRMATION_WINDOW is set")
 	}
@@ -465,6 +604,15 @@ func (c Config) Validate() error {
 	if c.MultiTenantBootstrapKey != "" && !c.MultiTenant {
 		return fmt.Errorf("MULTI_TENANT_BOOTSTRAP_KEY is set but MULTI_TENANT is false")
 	}
+	// Archive configuration: ARCHIVE_BUCKET is the master switch. When
+	// set, the endpoint must also be provided (S3-compatible stores
+	// need an explicit endpoint).
+	if c.ArchiveBucket != "" && c.ArchiveEndpoint == "" {
+		return fmt.Errorf("ARCHIVE_ENDPOINT is required when ARCHIVE_BUCKET is set")
+	}
+	if c.ArchiveMaxRetries < 0 {
+		return fmt.Errorf("ARCHIVE_MAX_RETRIES must be non-negative")
+	}
 	return nil
 }
 
@@ -472,6 +620,13 @@ func (c Config) Validate() error {
 // configured — the pruner only runs when this is true.
 func (c Config) RetentionEnabled() bool {
 	return c.RetentionMaxAge > 0 || c.RetentionMinLedger > 0
+}
+
+// ArchiveEnabled reports whether the S3-compatible archive backend
+// is configured. When true, pruned events can be exported before
+// deletion.
+func (c Config) ArchiveEnabled() bool {
+	return c.ArchiveBucket != ""
 }
 
 // ValidContractID reports whether s looks like a Soroban contract strkey.
@@ -503,6 +658,40 @@ func ValidCursor(s string) bool {
 		}
 	}
 	return true
+}
+
+// ParseStartLedger parses a START_LEDGER value that may be an absolute
+// ledger number or a relative offset like "latest-1000". Absolute values
+// must be positive. Relative offsets subtract from latestLedger and must
+// resolve to at least ledger 2.
+func ParseStartLedger(raw string, latestLedger ...uint32) (uint32, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	if n, err := strconv.ParseUint(raw, 10, 32); err == nil {
+		if n < 2 {
+			return 0, fmt.Errorf("START_LEDGER %q: ledger must be >= 2", raw)
+		}
+		return uint32(n), nil
+	}
+	if !strings.HasPrefix(strings.ToLower(raw), "latest-") {
+		return 0, fmt.Errorf("START_LEDGER %q: not an absolute ledger number or relative offset (expected N or latest-N)", raw)
+	}
+	offsetStr := raw[len("latest-"):]
+	offset, err := strconv.ParseUint(offsetStr, 10, 32)
+	if err != nil || offset == 0 {
+		return 0, fmt.Errorf("START_LEDGER %q: offset must be a positive integer", raw)
+	}
+	if len(latestLedger) == 0 || latestLedger[0] == 0 {
+		return 0, fmt.Errorf("START_LEDGER %q: relative offset requires RPC latest ledger (not available at config parse time)", raw)
+	}
+	latest := int64(latestLedger[0])
+	start := latest - int64(offset)
+	if start < 2 {
+		start = 2
+	}
+	return uint32(start), nil
 }
 
 // ValidOrigin reports whether s is a valid CORS origin: either the "*"
@@ -582,6 +771,7 @@ func (c Config) LoggableFields() []any {
 		dbURL = u.String()
 	}
 	return []any{
+		"network", c.Network,
 		"rpc_url", c.RPCURL,
 		"metrics_enabled", c.MetricsEnabled,
 		"rpc_max_attempts", c.RPCMaxAttempts,
@@ -594,6 +784,7 @@ func (c Config) LoggableFields() []any {
 		"http_addr", c.HTTPAddr,
 		"watched_contracts", len(c.WatchedContracts),
 		"start_ledger", c.StartLedger,
+		"start_ledger_raw", c.StartLedgerRaw,
 		"retention_ledgers", c.RetentionLedgers,
 		"log_level", c.LogLevel,
 		"http_read_timeout", c.HTTPReadTimeout,
@@ -603,6 +794,9 @@ func (c Config) LoggableFields() []any {
 		"shutdown_timeout", c.ShutdownTimeout,
 		"sweep_concurrency", c.SweepConcurrency,
 		"max_events_per_cycle", c.MaxEventsPerCycle,
+		"batch_size", c.BatchSize,
+		"batch_target_latency", c.BatchTargetLatency,
+		"batch_max_backoff", c.BatchMaxBackoff,
 		"reorg_confirmation_window", c.ReorgConfirmationWindow,
 		"reorg_rescan_interval", c.ReorgRescanInterval,
 		"export_max_range", c.ExportMaxRange,

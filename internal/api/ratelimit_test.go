@@ -331,3 +331,79 @@ func TestRateLimit_DifferentRemoteAddrsIsolated(t *testing.T) {
 		"second IP must NOT share bucket with first IP")
 	rb.Body.Close()
 }
+
+func TestQuota_HourlyExceededReturns429AndRemainingZero(t *testing.T) {
+	lim := NewRateLimiter(100, 100, false,
+		WithHourlyQuota(1),
+		WithDailyQuota(10),
+	)
+	stop := startLimiter(t, lim)
+	t.Cleanup(stop)
+
+	s := newTestServer(&stubStore{}, nil)
+	s.SetRateLimiter(lim)
+
+	req1 := mkReq(http.MethodGet, "/events")
+	req1.RemoteAddr = "198.51.100.10:1000"
+	resp1 := drive(t, s, req1)
+	require.Equal(t, http.StatusOK, resp1.StatusCode)
+	assert.Equal(t, "0", resp1.Header.Get("X-RateLimit-Remaining"), "one of one hourly quota has been used")
+	resp1.Body.Close()
+
+	req2 := mkReq(http.MethodGet, "/events")
+	req2.RemoteAddr = "198.51.100.10:1000"
+	resp2 := drive(t, s, req2)
+	defer resp2.Body.Close()
+	require.Equal(t, http.StatusTooManyRequests, resp2.StatusCode)
+	assert.Equal(t, "0", resp2.Header.Get("X-RateLimit-Remaining"), "exhausted quota must report zero remaining")
+	assert.NotEmpty(t, resp2.Header.Get("Retry-After"))
+}
+
+func TestQuota_RollingWindowsUseElapsedTime(t *testing.T) {
+	lim := NewRateLimiter(100, 100, false,
+		WithHourlyQuota(1),
+		WithDailyQuota(1),
+	)
+
+	entry := &bucketEntry{
+		hourStart: time.Now().Add(-2 * time.Hour),
+		hourUsed:  1,
+		dayStart:  time.Now().Add(-25 * time.Hour),
+		dayUsed:   1,
+	}
+
+	remaining, retryAfter, ok := lim.checkQuota(entry)
+	require.True(t, ok)
+	assert.Equal(t, int64(0), remaining, "quota should reset after the full rolling window elapsed")
+	assert.Zero(t, retryAfter)
+	assert.EqualValues(t, 1, entry.hourUsed)
+	assert.EqualValues(t, 1, entry.dayUsed)
+	assert.True(t, entry.hourStart.After(time.Now().Add(-time.Hour)))
+	assert.True(t, entry.dayStart.After(time.Now().Add(-24*time.Hour)))
+}
+
+func TestQuota_PerAPIKeyIsIndependentOfIP(t *testing.T) {
+	lim := NewRateLimiter(100, 100, false,
+		WithHourlyQuota(1),
+	)
+	stop := startLimiter(t, lim)
+	t.Cleanup(stop)
+
+	s := newTestServer(&stubStore{}, nil)
+	s.SetRateLimiter(lim)
+
+	first := mkReq(http.MethodGet, "/events")
+	first.RemoteAddr = "198.51.100.66:1000"
+	first.Header.Set("X-API-Key", "st_aaaaaaaaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	resp1 := drive(t, s, first)
+	require.Equal(t, http.StatusOK, resp1.StatusCode)
+	resp1.Body.Close()
+
+	second := mkReq(http.MethodGet, "/events")
+	second.RemoteAddr = "198.51.100.66:1000"
+	second.Header.Set("X-API-Key", "st_bbbbbbbbbbbbbbbb_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	resp2 := drive(t, s, second)
+	require.Equal(t, http.StatusOK, resp2.StatusCode,
+		"a different API key must keep its own quota bucket")
+	resp2.Body.Close()
+}
